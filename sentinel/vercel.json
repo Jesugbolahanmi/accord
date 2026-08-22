@@ -2,8 +2,7 @@
   "crons": [
     {
       "path": "/api/monitor-check",
-      "schedule": "*/15 * * * *",
-      "cronSecret": "CRON_SECRET"
+      "schedule": "*/15 * * * *"
     }
   ]
 }
