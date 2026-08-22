@@ -22,6 +22,12 @@ async function sendTelegramAlert(chatId: number, address: string, newFlags: any[
 
 export async function GET(req: NextRequest) {
   try {
+    // Vercel Cron passes the secret automatically — reject any other caller
+    const authHeader = req.headers.get("authorization");
+    if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { data: watches, error } = await supabase
       .from("watched_wallets")
       .select("*");

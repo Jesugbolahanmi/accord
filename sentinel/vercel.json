@@ -1,1 +1,9 @@
-{\r\n  "crons": [\r\n    {\r\n      "path": "/api/monitor-check",\r\n      "schedule": "*/15 * * * *"\r\n    }\r\n  ]\r\n}\r\n
+{
+  "crons": [
+    {
+      "path": "/api/monitor-check",
+      "schedule": "*/15 * * * *",
+      "cronSecret": "CRON_SECRET"
+    }
+  ]
+}

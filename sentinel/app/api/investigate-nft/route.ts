@@ -25,7 +25,6 @@ export async function POST(req: NextRequest) {
     }
 
     const metadata = await getNFTMetadata(address);
-    console.log("NFT METADATA:", JSON.stringify(metadata, null, 2));
     const flags = runNFTChecks(metadata);
     const report = await generateThreatReport(address, flags);
 

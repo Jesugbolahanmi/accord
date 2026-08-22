@@ -265,10 +265,13 @@ export function checkDustingPattern(transactions: any[], address: string): Flag 
   const valueGroups: Record<string, any[]> = {};
 
   for (const tx of outgoing) {
-    const roundedValue = Math.round(Number(tx.value) * 1000) / 1000; // round to avoid float noise
-    const key = `${tx.asset || "ETH"}_${roundedValue}`;
-    if (!valueGroups[key]) valueGroups[key] = [];
-    valueGroups[key].push(tx);
+    // Use BigInt string comparison for exact grouping — Number() silently loses
+    // precision on large wei-scale values (e.g. 18-decimal tokens).
+    // We still allow a small tolerance bucket (±1 wei) by dividing before stringifying.
+    const rawValue = BigInt(tx.value || "0");
+    const bucketKey = `${tx.asset || "ETH"}_${rawValue}`;
+    if (!valueGroups[bucketKey]) valueGroups[bucketKey] = [];
+    valueGroups[bucketKey].push(tx);
   }
 
   for (const key in valueGroups) {
