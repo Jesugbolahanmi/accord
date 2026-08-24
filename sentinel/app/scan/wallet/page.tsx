@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { useAccount, useConnect, useDisconnect } from "wagmi";
+
 import { 
   ArrowLeft, Search, Activity, ShieldAlert, ShieldCheck, 
   Wallet, Shield, CheckCircle2, AlertTriangle, Key, Send,
@@ -25,19 +25,10 @@ export default function WalletScan() {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState("");
   const [displayScore, setDisplayScore] = useState(0);
-  const [mounted, setMounted] = useState(false);
-  
-  const { address: walletAddress, isConnected } = useAccount();
-  const { connectors, connect } = useConnect();
-  const { disconnect } = useDisconnect();
 
   const [chatMessages, setChatMessages] = useState<{ role: string; content: string }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     if (!loading) return;
@@ -144,43 +135,14 @@ export default function WalletScan() {
 
       <div className="max-w-4xl mx-auto relative z-10">
         
-        {/* Top Navbar / Connect Wallet */}
-        <div className="flex flex-wrap justify-between items-center gap-3 mb-8">
-          <Link
-            href="/scan"
-            className="group flex items-center gap-2 font-[family-name:var(--font-mono)] text-xs text-[#7C8394] hover:text-[#38BDF8] transition-colors w-fit"
-          >
-            <ArrowLeft size={14} className="group-hover:-translate-x-1 transition-transform" /> 
-            RETURN TO DASHBOARD
-          </Link>
-
-          {!mounted ? null : isConnected ? (
-            <div className="flex items-center gap-3 bg-white/5 backdrop-blur-md border border-white/10 rounded-full px-4 py-2">
-              <span className="w-2 h-2 rounded-full bg-[#34D399] animate-pulse" />
-              <span className="font-[family-name:var(--font-mono)] text-xs text-[#B4B9C4] font-bold">
-                {walletAddress?.slice(0, 6)}...{walletAddress?.slice(-4)}
-              </span>
-              <button
-                onClick={() => disconnect()}
-                className="text-xs text-[#7C8394] hover:text-[#FF3B3B] transition-colors ml-2 font-[family-name:var(--font-mono)]"
-              >
-                [disconnect]
-              </button>
-            </div>
-          ) : (
-            <div className="flex gap-2">
-              {connectors.map((connector) => (
-                <button
-                  key={connector.uid}
-                  onClick={() => connect({ connector })}
-                  className="bg-white/5 backdrop-blur-md border border-white/10 hover:border-[#38BDF8]/50 hover:bg-white/10 rounded-full px-4 py-2 text-xs font-[family-name:var(--font-mono)] text-white font-bold transition-colors"
-                >
-                  Connect {connector.name}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        {/* Back nav */}
+        <Link
+          href="/scan"
+          className="group flex items-center gap-2 font-[family-name:var(--font-mono)] text-xs text-[#7C8394] hover:text-[#38BDF8] transition-colors w-fit mb-8"
+        >
+          <ArrowLeft size={14} className="group-hover:-translate-x-1 transition-transform" />
+          RETURN TO DASHBOARD
+        </Link>
 
         {/* Header section */}
         <div className="flex flex-col gap-2 mb-10">

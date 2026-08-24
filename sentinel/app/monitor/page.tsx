@@ -3,7 +3,7 @@
 import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useAccount } from "wagmi";
+
 import {
   ArrowLeft, Activity, Bell, Wallet, CheckCircle2,
   ShieldAlert, Send, Eye, Zap
@@ -24,12 +24,7 @@ function MonitorForm() {
   const [success, setSuccess]           = useState(false);
   const [error, setError]               = useState("");
   const [addedAddress, setAddedAddress] = useState("");
-  const [mounted, setMounted]           = useState(false);
-
-  const { address: walletAddress, isConnected } = useAccount();
   const searchParams = useSearchParams();
-
-  useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
     const prefill = searchParams.get("address");
@@ -139,18 +134,10 @@ function MonitorForm() {
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && !loading && address && handleWatch()}
-                  placeholder={mounted && isConnected ? walletAddress : "0x..."}
+                  placeholder="0x..."
                   className="w-full bg-black/40 border border-white/10 rounded-xl pl-11 pr-4 py-4 text-[#E6E8EC] placeholder-[#4a5063] font-[family-name:var(--font-mono)] text-sm focus:outline-none focus:border-[#34D399] focus:ring-1 focus:ring-[#34D399] transition-all"
                 />
               </div>
-              {mounted && isConnected && (
-                <button
-                  onClick={() => setAddress(walletAddress || "")}
-                  className="text-[11px] text-[#38BDF8] mt-2 hover:underline font-[family-name:var(--font-mono)] flex items-center gap-1"
-                >
-                  <Wallet size={10} /> use connected wallet
-                </button>
-              )}
             </div>
 
             {/* Submit button */}
