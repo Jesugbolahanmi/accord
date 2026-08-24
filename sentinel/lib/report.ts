@@ -34,7 +34,7 @@ export async function generateThreatReport(address: string, flags: Flag[], entit
     };
   }
 
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
 
   const prompt = `You are Sentinel, an AI Web3 incident-response agent. A deterministic scoring system has already calculated this ${entityType}'s risk score and threat level from its flagged activity — do not invent or change these numbers, only explain them.
 
