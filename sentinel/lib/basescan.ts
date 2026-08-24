@@ -103,6 +103,26 @@ export async function classifyAddress(address: string) {
   const hasActivity =
     (outgoing?.transfers?.length || 0) > 0 || (incoming?.transfers?.length || 0) > 0;
 
+  // If not found on Base at all, check DexScreener to see if it's a token on another chain
+  if (!isContractAddr && !hasActivity) {
+    try {
+      const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${address}`);
+      const dexData = await dexRes.json();
+      const pair = dexData?.pairs?.[0];
+      if (pair) {
+        const chainId = pair.chainId;
+        const tokenName = pair.baseToken?.name || "This token";
+        const chainLabel = chainId.charAt(0).toUpperCase() + chainId.slice(1);
+        return {
+          valid: false,
+          reason: `${tokenName} was found on ${chainLabel} chain, not Base. Sentinel currently supports Base-chain tokens only.`,
+        };
+      }
+    } catch {
+      // DexScreener check failed silently — fall through to default message
+    }
+  }
+
   return {
     valid: true,
     isContract: isContractAddr,
