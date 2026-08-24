@@ -155,3 +155,44 @@ export async function getNFTMetadata(address: string) {
   const data = await res.json();
   return data;
 }
+export async function getGoPlusSecurity(address: string) {
+  try {
+    const res = await fetch(
+      `https://api.gopluslabs.io/api/v1/token_security/8453?contract_addresses=`,
+      { headers: { accept: "application/json" } }
+    );
+    const data = await res.json();
+    const result = data?.result?.[address.toLowerCase()];
+    if (!result) return null;
+
+    const holders: any[] = result.holders || [];
+    const top10Percent = holders
+      .slice(0, 10)
+      .filter((h: any) => !h.is_locked)
+      .reduce((sum: number, h: any) => sum + parseFloat(h.percent || "0"), 0);
+
+    return {
+      isHoneypot: result.is_honeypot === "1",
+      cannotBuy: result.cannot_buy === "1",
+      buyTax: parseFloat(result.buy_tax || "0"),
+      sellTax: parseFloat(result.sell_tax || "0"),
+      isOpenSource: result.is_open_source === "1",
+      isProxy: result.is_proxy === "1",
+      ownerAddress: result.owner_address || null,
+      ownerRenounced:
+        !result.owner_address ||
+        result.owner_address === "0x0000000000000000000000000000000000000000",
+      creatorMadeHoneypot: result.honeypot_with_same_creator === "1",
+      holderCount: parseInt(result.holder_count || "0"),
+      top10HolderPercent: Math.round(top10Percent * 10000) / 100,
+      isTrusted: result.trust_list === "1",
+      isInCex: result.is_in_cex?.listed === "1",
+      cexList: result.is_in_cex?.cex_list || [],
+      tokenName: result.token_name,
+      tokenSymbol: result.token_symbol,
+    };
+  } catch (err) {
+    console.error("GoPlus security fetch failed:", err);
+    return null;
+  }
+}

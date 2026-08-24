@@ -4,7 +4,8 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { 
   ArrowLeft, Search, Activity, ShieldAlert, ShieldCheck, 
-  DollarSign, Droplets, PieChart, Info, AlertTriangle, CheckCircle2
+  DollarSign, Droplets, PieChart, Info, AlertTriangle, CheckCircle2,
+  Shield, Users, Lock, Code, TrendingDown
 } from "lucide-react";
 
 const INVESTIGATION_STEPS = [
@@ -302,6 +303,89 @@ export default function TokenScan() {
                 </div>
               )}
             </div>
+
+            {/* Security Analysis Card */}
+            {result.security && (
+              <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-5 sm:p-6 hover:bg-white/10 transition-colors">
+                <h3 className="font-[family-name:var(--font-mono)] text-xs text-[#7C8394] mb-5 flex items-center gap-2">
+                  <Shield size={16} /> SECURITY_ANALYSIS
+                  <span className="ml-auto text-[10px] text-[#4a5063]">via GoPlus</span>
+                </h3>
+                <div className="space-y-3 font-[family-name:var(--font-mono)] text-xs">
+
+                  {/* Honeypot */}
+                  <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                    <span className="text-[#7C8394] flex items-center gap-1.5"><ShieldAlert size={12} /> Honeypot</span>
+                    {result.security.isHoneypot
+                      ? <span className="text-[#FF3B3B] font-bold flex items-center gap-1"><AlertTriangle size={11} /> CONFIRMED</span>
+                      : <span className="text-[#34D399] font-bold flex items-center gap-1"><CheckCircle2 size={11} /> SAFE</span>}
+                  </div>
+
+                  {/* Buy Tax */}
+                  <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                    <span className="text-[#7C8394] flex items-center gap-1.5"><TrendingDown size={12} /> Buy Tax</span>
+                    <span className={result.security.buyTax > 10 ? "text-[#FF3B3B] font-bold" : result.security.buyTax > 5 ? "text-[#FFB020] font-bold" : "text-[#34D399] font-bold"}>
+                      {result.security.buyTax}%
+                    </span>
+                  </div>
+
+                  {/* Sell Tax */}
+                  <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                    <span className="text-[#7C8394] flex items-center gap-1.5"><TrendingDown size={12} /> Sell Tax</span>
+                    <span className={result.security.sellTax > 10 ? "text-[#FF3B3B] font-bold" : result.security.sellTax > 5 ? "text-[#FFB020] font-bold" : "text-[#34D399] font-bold"}>
+                      {result.security.sellTax}%
+                    </span>
+                  </div>
+
+                  {/* Source Verified */}
+                  <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                    <span className="text-[#7C8394] flex items-center gap-1.5"><Code size={12} /> Source Verified</span>
+                    {result.security.isOpenSource
+                      ? <span className="text-[#34D399] font-bold flex items-center gap-1"><CheckCircle2 size={11} /> YES</span>
+                      : <span className="text-[#FF3B3B] font-bold flex items-center gap-1"><AlertTriangle size={11} /> NO</span>}
+                  </div>
+
+                  {/* Owner Renounced */}
+                  <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                    <span className="text-[#7C8394] flex items-center gap-1.5"><Lock size={12} /> Owner Renounced</span>
+                    {result.security.ownerRenounced
+                      ? <span className="text-[#34D399] font-bold flex items-center gap-1"><CheckCircle2 size={11} /> YES</span>
+                      : <span className="text-[#FFB020] font-bold flex items-center gap-1"><AlertTriangle size={11} /> NO</span>}
+                  </div>
+
+                  {/* Proxy */}
+                  <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                    <span className="text-[#7C8394] flex items-center gap-1.5"><Code size={12} /> Upgradeable Proxy</span>
+                    {result.security.isProxy
+                      ? <span className="text-[#FFB020] font-bold">YES</span>
+                      : <span className="text-[#34D399] font-bold">NO</span>}
+                  </div>
+
+                  {/* Holder Concentration */}
+                  <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                    <span className="text-[#7C8394] flex items-center gap-1.5"><Users size={12} /> Top 10 Holders</span>
+                    <span className={result.security.top10HolderPercent > 80 ? "text-[#FF3B3B] font-bold" : result.security.top10HolderPercent > 50 ? "text-[#FFB020] font-bold" : "text-[#34D399] font-bold"}>
+                      {result.security.top10HolderPercent}%
+                    </span>
+                  </div>
+
+                  {/* Holder Count */}
+                  <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                    <span className="text-[#7C8394] flex items-center gap-1.5"><Users size={12} /> Total Holders</span>
+                    <span className="text-[#E6E8EC] font-bold">{result.security.holderCount.toLocaleString()}</span>
+                  </div>
+
+                  {/* CEX Listed */}
+                  {result.security.isInCex && (
+                    <div className="flex justify-between items-center bg-[#34D399]/5 border border-[#34D399]/20 rounded-lg px-3 py-2.5">
+                      <span className="text-[#7C8394] flex items-center gap-1.5"><CheckCircle2 size={12} /> CEX Listed</span>
+                      <span className="text-[#34D399] font-bold">{result.security.cexList.join(", ")}</span>
+                    </div>
+                  )}
+
+                </div>
+              </div>
+            )}
 
             {/* Detected Flags */}
             {result.flags && result.flags.length > 0 && (

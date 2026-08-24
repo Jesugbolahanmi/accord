@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { classifyAddress, getTokenMetadata, getWalletTransactions, getTokenMarketData } from "@/lib/basescan";
-import { runTokenChecks } from "@/lib/token-rules";
+import { classifyAddress, getTokenMetadata, getWalletTransactions, getTokenMarketData, getGoPlusSecurity } from "@/lib/basescan";
+import { runTokenChecks, runGoPlusChecks } from "@/lib/token-rules";
 import { generateThreatReport } from "@/lib/report";
 
 export async function POST(req: NextRequest) {
@@ -24,19 +24,27 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const metadata = await getTokenMetadata(address);
-    const marketData = await getTokenMarketData(address);
-    const transactions = await getWalletTransactions(address);
+    const [metadata, marketData, transactions, security] = await Promise.all([
+      getTokenMetadata(address),
+      getTokenMarketData(address),
+      getWalletTransactions(address),
+      getGoPlusSecurity(address),
+    ]);
+
     const oldestTx = transactions[transactions.length - 1];
     const firstTxTimestamp = oldestTx ? parseInt(oldestTx.timeStamp) * 1000 : null;
 
-    const flags = runTokenChecks(metadata, firstTxTimestamp);
+    const baseFlags = runTokenChecks(metadata, firstTxTimestamp);
+    const goPlusFlags = runGoPlusChecks(security);
+    const flags = [...goPlusFlags, ...baseFlags];
+
     const report = await generateThreatReport(address, flags, "token");
 
     return NextResponse.json({
       address,
       metadata,
       marketData,
+      security,
       flags,
       report,
     });
