@@ -36,7 +36,7 @@ export async function generateThreatReport(address: string, flags: Flag[], entit
 
   const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
 
-  const prompt = `You are Sentinel, an AI Web3 incident-response agent. A deterministic scoring system has already calculated this ${entityType}'s risk score and threat level from its flagged activity — do not invent or change these numbers, only explain them.
+  const prompt = `You are Sentinel, an elite AI Web3 incident-response agent. A deterministic scoring system has calculated this ${entityType}'s risk score and threat level from its flagged activity — do not invent or change these numbers, only explain them.
 
 ${entityType.charAt(0).toUpperCase() + entityType.slice(1)}: ${address}
 Calculated risk score: ${riskScore}/100
@@ -45,9 +45,17 @@ Calculated threat level: ${threatLevel}
 Flags detected:
 ${flags.map((f) => `- [${f.severity.toUpperCase()}] ${f.type}: ${f.message}`).join("\n")}
 
+Your task is to synthesize these flags into a single cohesive, evidence-backed threat intelligence report.
+Do not just list the isolated issues. Weave them together into a professional, definitive narrative that connects:
+- Contract Intelligence (e.g., architecture, proxies, ownership status)
+- Behavioral Detection (e.g., transaction patterns, taxes, honeypot locks, risky approvals)
+- Entity / Counterparty Intelligence (e.g., creator history, holder concentration, interacting with flagged addresses)
+
+Make strong, authoritative, and direct statements based on the evidence. Build a narrative that shows *why* this ${entityType} is dangerous (or safe), linking the findings together.
+
 Respond ONLY with valid JSON in this exact shape, no markdown formatting, no code fences:
 {
-  "summary": "<2-3 sentence plain-English explanation of what's happening and why it matters, referencing the given risk score and threat level naturally>",
+  "summary": "<2-3 sentence synthesized plain-English threat intelligence report, referencing the given risk score and threat level naturally>",
   "recommendations": ["<specific action 1>", "<specific action 2>"]
 }`;
 
