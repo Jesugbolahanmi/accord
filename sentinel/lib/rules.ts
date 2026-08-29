@@ -81,8 +81,11 @@ export function checkLargeOutflow(transactions: any[], address: string): {
   );
   if (outgoing.length === 0) return { flag: null, destinationAddress: null };
 
-  // only treat native ETH transfers (18 decimals, no token asset name) as ETH outflows
-  const ethOutgoing = outgoing.filter((tx) => tx.decimal === 18 && !tx.asset);
+  // Accept native ETH: Alchemy returns asset="ETH" for external transfers,
+  // or empty string in some edge cases. Either way, decimal should be 18.
+  const ethOutgoing = outgoing.filter(
+    (tx) => tx.decimal === 18 && (tx.asset === "ETH" || tx.asset === "" || !tx.asset)
+  );
   if (ethOutgoing.length === 0) return { flag: null, destinationAddress: null };
 
   const largest = ethOutgoing.reduce((max: any, tx: any) =>

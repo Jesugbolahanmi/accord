@@ -425,7 +425,7 @@ export default function WalletScan() {
               ) : (
                 <div className="p-4 bg-black/40 border border-[#34D399]/20 rounded-xl text-center text-[#34D399] text-xs font-[family-name:var(--font-mono)] flex flex-col items-center gap-2 shadow-[0_0_15px_rgba(52,211,153,0.1)]">
                   <CheckCircle2 size={24} />
-                  No active unrevoked token approvals detected onchain.
+                  No active unrevoked token approvals detected onchain. Wallet appears clean.
                 </div>
               )}
             </div>
@@ -556,7 +556,7 @@ export default function WalletScan() {
             )}
 
             {/* Fund Trace Analysis (Graph Intelligence) */}
-            {result.trail && result.trail.length > 0 && (
+            {(result.outflowContext || (result.trail && result.trail.length > 0)) && (
               <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6">
                 <h3 className="font-[family-name:var(--font-mono)] text-xs text-[#7C8394] mb-5 flex items-center gap-2">
                   <Activity size={16} /> TRANSACTION_GRAPH_ANALYSIS
@@ -568,8 +568,9 @@ export default function WalletScan() {
                   <div className="mb-4 bg-black/40 border border-white/5 rounded-xl p-4 text-xs font-[family-name:var(--font-mono)]">
                     <span className="text-[#7C8394] block mb-1">DESTINATION_CONTEXT:</span>
                     <span className={result.outflowContext.safe ? "text-[#34D399]" : result.outflowContext.isFresh ? "text-[#FF3B3B]" : "text-[#FFB020]"}>
-                      {result.outflowContext.name} 
-                      {result.outflowContext.type !== "UNKNOWN" && ` [${result.outflowContext.type}]`}
+                      {result.outflowContext.name}
+                      {result.outflowContext.type && result.outflowContext.type !== "UNKNOWN" && ` [${result.outflowContext.type}]`}
+                      {result.outflowContext.firstSeenDaysAgo !== undefined && ` — ${result.outflowContext.firstSeenDaysAgo}d old wallet`}
                     </span>
                   </div>
                 )}
@@ -577,8 +578,8 @@ export default function WalletScan() {
                 {(() => {
                   const nodes: any[] = [];
                   const edges: any[] = [];
-                  
-                  // Add the starting wallet
+
+                  // Center node — the investigated wallet
                   nodes.push({
                     id: result.address.toLowerCase(),
                     address: result.address,
@@ -586,40 +587,50 @@ export default function WalletScan() {
                     isCenter: true,
                   });
 
-                  // Process trail hops
-                  result.trail.forEach((hop: any, i: number) => {
-                    if (hop.outflowTo) {
-                      const toId = hop.outflowTo.toLowerCase();
-                      
-                      // Check if this hop matches the outflow context we resolved
-                      let safe = false;
-                      let entityType = "UNKNOWN";
-                      let label = "Unknown Hop";
+                  // Build graph from trail hops if available
+                  if (result.trail && result.trail.length > 0) {
+                    result.trail.forEach((hop: any) => {
+                      if (hop.outflowTo) {
+                        const toId = hop.outflowTo.toLowerCase();
+                        let safe = false;
+                        let entityType = "UNKNOWN";
+                        let label = "Unknown Wallet";
 
-                      if (result.outflowContext && result.outflowContext.address.toLowerCase() === toId) {
-                        safe = result.outflowContext.safe;
-                        entityType = result.outflowContext.type;
-                        label = result.outflowContext.name;
+                        if (result.outflowContext && result.outflowContext.address?.toLowerCase() === toId) {
+                          safe = result.outflowContext.safe;
+                          entityType = result.outflowContext.type;
+                          label = result.outflowContext.name;
+                        }
+
+                        nodes.push({ id: toId, address: hop.outflowTo, label, entityType, safe, amount: hop.outflowAmount });
+                        edges.push({ from: hop.address.toLowerCase(), to: toId, label: `${hop.outflowAmount} ETH`, isRisky: !safe });
                       }
+                    });
+                  } else if (result.outflowContext) {
+                    // Fallback: direct 2-node graph from outflowContext alone
+                    const destId = result.outflowContext.address?.toLowerCase() || "destination";
+                    const outflowFlag = result.flags?.find((f: any) => f.type === "LARGE_OUTFLOW");
+                    const ethMatch = outflowFlag?.message?.match(/([\d.]+)\s*ETH/);
+                    const ethAmount = ethMatch ? ethMatch[1] : "?";
 
-                      nodes.push({
-                        id: toId,
-                        address: hop.outflowTo,
-                        label: label,
-                        entityType: entityType,
-                        safe: safe,
-                        amount: hop.outflowAmount,
-                      });
+                    nodes.push({
+                      id: destId,
+                      address: result.outflowContext.address || destId,
+                      label: result.outflowContext.name || "Unknown Wallet",
+                      entityType: result.outflowContext.type || "UNKNOWN",
+                      safe: result.outflowContext.safe,
+                      isFresh: result.outflowContext.isFresh,
+                      amount: ethAmount,
+                    });
+                    edges.push({
+                      from: result.address.toLowerCase(),
+                      to: destId,
+                      label: `${ethAmount} ETH`,
+                      isRisky: !result.outflowContext.safe,
+                    });
+                  }
 
-                      edges.push({
-                        from: hop.address.toLowerCase(),
-                        to: toId,
-                        label: `${hop.outflowAmount} ETH`,
-                        isRisky: !safe,
-                      });
-                    }
-                  });
-
+                  if (nodes.length < 2) return null;
                   return <TransactionFlowChart centerAddress={result.address} nodes={nodes} edges={edges} />;
                 })()}
               </div>
