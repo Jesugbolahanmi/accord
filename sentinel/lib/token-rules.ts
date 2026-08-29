@@ -1,5 +1,46 @@
 import { Flag } from "./rules";
 
+export function checkFundingSource(funding: any): Flag | null {
+  if (!funding) return null;
+
+  if (funding.type === "MIXER") {
+    return {
+      type: "MIXER_FUNDED_CREATOR",
+      severity: "critical",
+      message: `The token creator's initial funding came from a privacy mixer (${funding.name}). Scammers almost universally use mixers to hide their identities before deploying rug pulls.`,
+    };
+  }
+
+  if (funding.type === "CEX") {
+    return {
+      type: "KYC_EXCHANGE_FUNDED",
+      severity: "low",
+      message: `The token creator was funded directly from a centralized exchange (${funding.name}), implying their identity is likely KYC'd. This significantly lowers the risk of a blatant rug pull.`,
+    };
+  }
+
+  if (funding.type === "FRESH") {
+    return {
+      type: "ORPHAN_CREATOR_WALLET",
+      severity: "medium",
+      message: "The creator wallet has no traceable external funding history on-chain. It may have been funded internally by another smart contract to obscure origin.",
+    };
+  }
+
+  return null;
+}
+
+export function checkWashTrading(washData: any): Flag | null {
+  if (!washData || !washData.isWashTrading) return null;
+
+  return {
+    type: "WASH_TRADING_DETECTED",
+    severity: "high",
+    message: `Graph intelligence detected ${washData.pairsFound} instances of circular ping-pong transfers (A ↔ B) in the token's recent history. This is used to fake organic trading volume.`,
+  };
+}
+
+
 export function checkTokenAge(firstTxTimestamp: number | null): Flag | null {
   if (!firstTxTimestamp) return null;
 
@@ -123,7 +164,12 @@ export function runGoPlusChecks(security: any): Flag[] {
   return flags;
 }
 
-export function runTokenChecks(metadata: any, firstTxTimestamp: number | null): Flag[] {
+export function runTokenChecks(
+  metadata: any, 
+  firstTxTimestamp: number | null,
+  fundingSource?: any,
+  washData?: any
+): Flag[] {
   const flags: Flag[] = [];
 
   const suspiciousFlag = checkSuspiciousMetadata(metadata);
@@ -134,6 +180,12 @@ export function runTokenChecks(metadata: any, firstTxTimestamp: number | null): 
 
   const ageFlag = checkTokenAge(firstTxTimestamp);
   if (ageFlag) flags.push(ageFlag);
+
+  const fundingFlag = checkFundingSource(fundingSource);
+  if (fundingFlag) flags.push(fundingFlag);
+
+  const washFlag = checkWashTrading(washData);
+  if (washFlag) flags.push(washFlag);
 
   return flags;
 }

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { 
   ArrowLeft, Search, Activity, ShieldAlert, ShieldCheck, 
   DollarSign, Droplets, PieChart, Info, AlertTriangle, CheckCircle2,
-  Shield, Users, Lock, Code, TrendingDown
+  Shield, Users, Lock, Code, TrendingDown, Network
 } from "lucide-react";
 
 const INVESTIGATION_STEPS = [
@@ -380,6 +380,43 @@ export default function TokenScan() {
                     <div className="flex justify-between items-center bg-[#34D399]/5 border border-[#34D399]/20 rounded-lg px-3 py-2.5">
                       <span className="text-[#7C8394] flex items-center gap-1.5"><CheckCircle2 size={12} /> CEX Listed</span>
                       <span className="text-[#34D399] font-bold">{result.security.cexList.join(", ")}</span>
+                    </div>
+                  )}
+
+                </div>
+              </div>
+            </div>
+
+            {/* Graph Intelligence Card */}
+            {result.graphData && (
+              <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-5 sm:p-6 hover:bg-white/10 transition-colors mt-4">
+                <h3 className="font-[family-name:var(--font-mono)] text-xs text-[#7C8394] mb-5 flex items-center gap-2">
+                  <Network size={16} /> GRAPH_INTELLIGENCE
+                  <span className="ml-auto text-[10px] text-[#4a5063]">via Sentinel</span>
+                </h3>
+                <div className="space-y-3 font-[family-name:var(--font-mono)] text-xs">
+
+                  {/* Creator Funding */}
+                  {result.graphData.fundingSource && (
+                    <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                      <span className="text-[#7C8394] flex items-center gap-1.5"><ArrowLeft size={12} /> Creator Funding</span>
+                      <span className={
+                        result.graphData.fundingSource.type === "MIXER" ? "text-[#FF3B3B] font-bold" :
+                        result.graphData.fundingSource.type === "CEX" ? "text-[#34D399] font-bold" :
+                        "text-[#FFB020] font-bold"
+                      }>
+                        {result.graphData.fundingSource.name}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Wash Trading */}
+                  {result.graphData.washData && (
+                    <div className="flex justify-between items-center bg-black/30 rounded-lg px-3 py-2.5">
+                      <span className="text-[#7C8394] flex items-center gap-1.5"><Activity size={12} /> Wash Trading</span>
+                      {result.graphData.washData.isWashTrading
+                        ? <span className="text-[#FF3B3B] font-bold flex items-center gap-1"><AlertTriangle size={11} /> YES ({result.graphData.washData.pairsFound} pairs)</span>
+                        : <span className="text-[#34D399] font-bold flex items-center gap-1"><CheckCircle2 size={11} /> NO</span>}
                     </div>
                   )}
 

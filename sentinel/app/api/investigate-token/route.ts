@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { classifyAddress, getTokenMetadata, getWalletTransactions, getTokenMarketData, getGoPlusSecurity } from "@/lib/basescan";
+import { traceFundingSource, detectWashTrading } from "@/lib/graph";
 import { runTokenChecks, runGoPlusChecks } from "@/lib/token-rules";
 import { generateThreatReport } from "@/lib/report";
 
@@ -34,7 +35,17 @@ export async function POST(req: NextRequest) {
     const oldestTx = transactions[transactions.length - 1];
     const firstTxTimestamp = oldestTx ? parseInt(oldestTx.timeStamp) * 1000 : null;
 
-    const baseFlags = runTokenChecks(metadata, firstTxTimestamp);
+    // Execute Graph Intelligence
+    let fundingSource = null;
+    let washData = null;
+    if (security?.creatorAddress) {
+      fundingSource = await traceFundingSource(security.creatorAddress);
+    }
+    if (transactions.length > 0) {
+      washData = detectWashTrading(transactions);
+    }
+
+    const baseFlags = runTokenChecks(metadata, firstTxTimestamp, fundingSource, washData);
     const goPlusFlags = runGoPlusChecks(security);
     const flags = [...goPlusFlags, ...baseFlags];
 
@@ -45,6 +56,7 @@ export async function POST(req: NextRequest) {
       metadata,
       marketData,
       security,
+      graphData: { fundingSource, washData },
       flags,
       report,
     });
