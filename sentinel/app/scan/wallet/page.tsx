@@ -578,32 +578,56 @@ export default function WalletScan() {
                 {(() => {
                   const nodes: any[] = [];
                   const edges: any[] = [];
+                  const seenIds = new Set<string>();
+
+                  const addNode = (node: any) => {
+                    if (!seenIds.has(node.id)) {
+                      seenIds.add(node.id);
+                      nodes.push(node);
+                    }
+                  };
 
                   // Center node — the investigated wallet
-                  nodes.push({
+                  addNode({
                     id: result.address.toLowerCase(),
                     address: result.address,
                     label: "Target Wallet",
                     isCenter: true,
                   });
 
-                  // Build graph from trail hops if available
+                  // Build graph from multi-hop trail
                   if (result.trail && result.trail.length > 0) {
                     result.trail.forEach((hop: any) => {
+                      // Add the hop address as a node
+                      if (hop.address.toLowerCase() !== result.address.toLowerCase()) {
+                        addNode({
+                          id: hop.address.toLowerCase(),
+                          address: hop.address,
+                          label: hop.label || "Unknown Wallet",
+                          entityType: hop.entityType || "UNKNOWN",
+                          safe: hop.safe,
+                          isFresh: hop.isFresh,
+                          amount: hop.incomingAmount,
+                        });
+                      }
+
+                      // Add the outflow destination
                       if (hop.outflowTo) {
-                        const toId = hop.outflowTo.toLowerCase();
-                        let safe = false;
-                        let entityType = "UNKNOWN";
-                        let label = "Unknown Wallet";
+                        addNode({
+                          id: hop.outflowTo.toLowerCase(),
+                          address: hop.outflowTo,
+                          label: hop.outflowToLabel || "Unknown Wallet",
+                          entityType: hop.outflowToEntityType || "UNKNOWN",
+                          safe: hop.outflowToSafe,
+                          amount: hop.outflowAmount,
+                        });
 
-                        if (result.outflowContext && result.outflowContext.address?.toLowerCase() === toId) {
-                          safe = result.outflowContext.safe;
-                          entityType = result.outflowContext.type;
-                          label = result.outflowContext.name;
-                        }
-
-                        nodes.push({ id: toId, address: hop.outflowTo, label, entityType, safe, amount: hop.outflowAmount });
-                        edges.push({ from: hop.address.toLowerCase(), to: toId, label: `${hop.outflowAmount} ETH`, isRisky: !safe });
+                        edges.push({
+                          from: hop.address.toLowerCase(),
+                          to: hop.outflowTo.toLowerCase(),
+                          label: `${hop.outflowAmount} ETH`,
+                          isRisky: !hop.outflowToSafe,
+                        });
                       }
                     });
                   } else if (result.outflowContext) {
@@ -613,7 +637,7 @@ export default function WalletScan() {
                     const ethMatch = outflowFlag?.message?.match(/([\d.]+)\s*ETH/);
                     const ethAmount = ethMatch ? ethMatch[1] : "?";
 
-                    nodes.push({
+                    addNode({
                       id: destId,
                       address: result.outflowContext.address || destId,
                       label: result.outflowContext.name || "Unknown Wallet",

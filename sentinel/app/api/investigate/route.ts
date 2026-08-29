@@ -89,11 +89,11 @@ export async function POST(req: NextRequest) {
 
     const report = await generateThreatReport(address, flags);
 
-    // Build fund trace only if outflow flag still present and not cleared as safe
-    const hasRiskyOutflow = flags.some(
-      (f) => f.type === "LARGE_OUTFLOW" && f.severity !== "low"
-    );
-    const trail = hasRiskyOutflow ? await traceFunds(address, 3) : [];
+    // Build fund trace: start from the destination of the outflow and follow forward
+    // Always trace when there's a large outflow flag (even if downgraded to low severity)
+    const hasOutflow = flags.some((f) => f.type === "LARGE_OUTFLOW");
+    const traceStartAddress = outflowDestination || address;
+    const trail = hasOutflow ? await traceFunds(traceStartAddress, 4) : [];
 
     return NextResponse.json({
       address,
