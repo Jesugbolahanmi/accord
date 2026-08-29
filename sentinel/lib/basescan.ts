@@ -179,6 +179,7 @@ export async function getGoPlusSecurity(address: string) {
       isOpenSource: result.is_open_source === "1",
       isProxy: result.is_proxy === "1",
       ownerAddress: result.owner_address || null,
+      creatorAddress: result.creator_address || null,
       ownerRenounced:
         !result.owner_address ||
         result.owner_address === "0x0000000000000000000000000000000000000000",

@@ -22,11 +22,17 @@ export interface Flag {
   details?: TokenDetail[];
 }
 
-export function checkWalletAge(transactions: any[]): Flag | null {
-  if (transactions.length === 0) return null;
+export function checkWalletAge(transactions: any[], accurateFirstTxTimestamp?: number | null): Flag | null {
+  // Prefer the accurate first-ever tx timestamp if provided
+  let firstTxTime: number;
+  if (accurateFirstTxTimestamp) {
+    firstTxTime = accurateFirstTxTimestamp;
+  } else {
+    if (transactions.length === 0) return null;
+    const oldest = transactions[transactions.length - 1];
+    firstTxTime = parseInt(oldest.timeStamp) * 1000;
+  }
 
-  const oldest = transactions[transactions.length - 1];
-  const firstTxTime = parseInt(oldest.timeStamp) * 1000;
   const ageInDays = (Date.now() - firstTxTime) / (1000 * 60 * 60 * 24);
 
   if (ageInDays < 7) {
@@ -39,7 +45,7 @@ export function checkWalletAge(transactions: any[]): Flag | null {
   return null;
 }
 
-export function checkTransactionBurst(transactions: any[]): Flag | null {
+export function checkTransactionBurst(transactions: any[], knownSafeAddresses: Set<string> = new Set()): Flag | null {
   if (transactions.length < 5) return null;
 
   const recentFive = transactions.slice(0, 5);
@@ -47,25 +53,37 @@ export function checkTransactionBurst(transactions: any[]): Flag | null {
   const spreadSeconds = timestamps[0] - timestamps[4];
 
   if (spreadSeconds < 300) {
-    return {
-      type: "TRANSACTION_BURST",
-      severity: "medium",
-      message: `5 transactions occurred within ${Math.floor(spreadSeconds / 60)} minutes`,
-    };
+    // Only flag if transactions are going to multiple DIFFERENT unknown addresses
+    // (e.g. a DeFi multi-step is approve + swap + stake — all to known contracts, not suspicious)
+    const unknownDestinations = new Set(
+      recentFive
+        .map((tx) => tx.to?.toLowerCase())
+        .filter((addr) => addr && !knownSafeAddresses.has(addr))
+    );
+
+    if (unknownDestinations.size >= 3) {
+      return {
+        type: "TRANSACTION_BURST",
+        severity: "medium",
+        message: `5 transactions to ${unknownDestinations.size} different unknown addresses within ${Math.floor(spreadSeconds / 60)} minutes — unusual activity pattern`,
+      };
+    }
   }
   return null;
 }
 
-export function checkLargeOutflow(transactions: any[], address: string): Flag | null {
+export function checkLargeOutflow(transactions: any[], address: string): {
+  flag: Flag | null;
+  destinationAddress: string | null;
+} {
   const outgoing = transactions.filter(
     (tx) => tx.from.toLowerCase() === address.toLowerCase()
   );
-  if (outgoing.length === 0) return null;
+  if (outgoing.length === 0) return { flag: null, destinationAddress: null };
 
   // only treat native ETH transfers (18 decimals, no token asset name) as ETH outflows
-  // avoids misreading a low-decimal or high-decimal token amount as billions of "ETH"
   const ethOutgoing = outgoing.filter((tx) => tx.decimal === 18 && !tx.asset);
-  if (ethOutgoing.length === 0) return null;
+  if (ethOutgoing.length === 0) return { flag: null, destinationAddress: null };
 
   const largest = ethOutgoing.reduce((max: any, tx: any) =>
     BigInt(tx.value) > BigInt(max.value) ? tx : max
@@ -74,12 +92,15 @@ export function checkLargeOutflow(transactions: any[], address: string): Flag | 
 
   if (valueInEth > 1) {
     return {
-      type: "LARGE_OUTFLOW",
-      severity: "high",
-      message: `Large outgoing transfer of ${valueInEth.toFixed(4)} ETH detected`,
+      flag: {
+        type: "LARGE_OUTFLOW",
+        severity: "high",
+        message: `Large outgoing transfer of ${valueInEth.toFixed(4)} ETH detected`,
+      },
+      destinationAddress: largest.to || null,
     };
   }
-  return null;
+  return { flag: null, destinationAddress: null };
 }
 
 export function checkPhishingTokenNames(transfers: any[]): Flag | null {
@@ -226,18 +247,25 @@ export async function runAllChecks(
   transactions: any[],
   address: string,
   approvals: ActiveApproval[] = [],
-  permits: DetectedPermit[] = []
-): Promise<Flag[]> {
+  permits: DetectedPermit[] = [],
+  firstTxTimestamp?: number | null,
+  knownSafeAddresses: Set<string> = new Set()
+): Promise<{ flags: Flag[]; outflowDestination: string | null }> {
   const flags: Flag[] = [];
+  let outflowDestination: string | null = null;
 
-  const ageFlag = checkWalletAge(transactions);
-  if (ageFlag) flags.push(ageFlag);
+  // Use provided accurate first-tx timestamp if available, else fall back to sample
+  const walletAgeFlag = checkWalletAge(transactions, firstTxTimestamp);
+  if (walletAgeFlag) flags.push(walletAgeFlag);
 
-  const burstFlag = checkTransactionBurst(transactions);
+  const burstFlag = checkTransactionBurst(transactions, knownSafeAddresses);
   if (burstFlag) flags.push(burstFlag);
 
-  const outflowFlag = checkLargeOutflow(transactions, address);
-  if (outflowFlag) flags.push(outflowFlag);
+  const { flag: outflowFlag, destinationAddress } = checkLargeOutflow(transactions, address);
+  if (outflowFlag) {
+    flags.push(outflowFlag);
+    outflowDestination = destinationAddress;
+  }
 
   const phishingFlag = checkPhishingTokenNames(transactions);
   if (phishingFlag) flags.push(phishingFlag);
@@ -251,7 +279,7 @@ export async function runAllChecks(
   const approvalFlags = await checkApprovalRisks(approvals, permits);
   flags.push(...approvalFlags);
 
-  return flags;
+  return { flags, outflowDestination };
 }
 
 export function checkDustingPattern(transactions: any[], address: string): Flag | null {

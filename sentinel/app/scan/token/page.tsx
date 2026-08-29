@@ -385,7 +385,7 @@ export default function TokenScan() {
 
                 </div>
               </div>
-            </div>
+            )}
 
             {/* Graph Intelligence Card */}
             {result.graphData && (

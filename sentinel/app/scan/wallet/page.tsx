@@ -8,6 +8,8 @@ import {
   Wallet, Shield, CheckCircle2, AlertTriangle, Key, Send,
   Cpu, FileCode2, History, ChevronRight
 } from "lucide-react";
+import TransactionFlowChart from "@/components/TransactionFlowChart";
+
 
 const INVESTIGATION_STEPS = [
   "Connecting to Base network...",
@@ -553,53 +555,73 @@ export default function WalletScan() {
               </div>
             )}
 
-            {/* Fund Trace Analysis */}
+            {/* Fund Trace Analysis (Graph Intelligence) */}
             {result.trail && result.trail.length > 0 && (
               <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6">
                 <h3 className="font-[family-name:var(--font-mono)] text-xs text-[#7C8394] mb-5 flex items-center gap-2">
-                  <Activity size={16} /> FUND_TRACE_ANALYSIS
+                  <Activity size={16} /> TRANSACTION_GRAPH_ANALYSIS
+                  <span className="ml-auto text-[10px] text-[#4a5063]">via Sentinel</span>
                 </h3>
-                <div className="space-y-4 font-[family-name:var(--font-mono)] text-xs relative before:absolute before:inset-0 before:ml-[15px] before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-white/10 before:to-transparent">
-                  {result.trail.map((hop: any, i: number) => (
-                    <div key={i} className="relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group is-active">
+                
+                {/* Outflow Context Alert */}
+                {result.outflowContext && (
+                  <div className="mb-4 bg-black/40 border border-white/5 rounded-xl p-4 text-xs font-[family-name:var(--font-mono)]">
+                    <span className="text-[#7C8394] block mb-1">DESTINATION_CONTEXT:</span>
+                    <span className={result.outflowContext.safe ? "text-[#34D399]" : result.outflowContext.isFresh ? "text-[#FF3B3B]" : "text-[#FFB020]"}>
+                      {result.outflowContext.name} 
+                      {result.outflowContext.type !== "UNKNOWN" && ` [${result.outflowContext.type}]`}
+                    </span>
+                  </div>
+                )}
+
+                {(() => {
+                  const nodes: any[] = [];
+                  const edges: any[] = [];
+                  
+                  // Add the starting wallet
+                  nodes.push({
+                    id: result.address.toLowerCase(),
+                    address: result.address,
+                    label: "Target Wallet",
+                    isCenter: true,
+                  });
+
+                  // Process trail hops
+                  result.trail.forEach((hop: any, i: number) => {
+                    if (hop.outflowTo) {
+                      const toId = hop.outflowTo.toLowerCase();
                       
-                      {/* Node circle */}
-                      <div className="flex items-center justify-center w-8 h-8 rounded-full border border-white/20 bg-black/80 shadow shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 z-10 text-[#38BDF8]">
-                        <Cpu size={14} />
-                      </div>
-                      
-                      {/* Card */}
-                      <div className="w-[calc(100%-2.5rem)] md:w-[calc(50%-2.5rem)] bg-black/60 border border-white/5 rounded-xl p-4 hover:border-white/10 transition-colors">
-                        <div className="flex justify-between items-center mb-3 pb-2 border-b border-white/5">
-                          <span className="text-[#38BDF8] font-bold bg-[#38BDF8]/10 px-2 py-0.5 rounded text-[10px]">HOP {i + 1}</span>
-                          {hop.outflowTo && <span className="text-[#FF3B3B] font-bold text-[10px] bg-[#FF3B3B]/10 px-2 py-0.5 rounded flex items-center gap-1"><ArrowLeft size={10} className="rotate-45"/> OUTFLOW</span>}
-                        </div>
-                        <div className="space-y-2 text-[#B4B9C4]">
-                          <div className="flex flex-col">
-                            <span className="text-[#7C8394] text-[10px] mb-0.5">NODE ADDRESS</span>
-                            <a href={`https://basescan.org/address/${hop.address}`} target="_blank" rel="noopener noreferrer" className="text-white hover:text-[#38BDF8] hover:underline font-bold truncate">
-                              {hop.address}
-                            </a>
-                          </div>
-                          {hop.outflowTo && (
-                            <div className="bg-[#FF3B3B]/5 p-2 rounded border border-[#FF3B3B]/10 mt-2 space-y-1">
-                              <div className="flex justify-between items-center">
-                                <span className="text-[#7C8394] text-[10px]">SENT TO</span>
-                                <a href={`https://basescan.org/address/${hop.outflowTo}`} target="_blank" rel="noopener noreferrer" className="text-[#FF3B3B] hover:underline font-bold truncate max-w-[120px]">
-                                  {hop.outflowTo}
-                                </a>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-[#7C8394] text-[10px]">AMOUNT</span>
-                                <span className="text-white font-bold">{hop.outflowAmount} ETH</span>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                      // Check if this hop matches the outflow context we resolved
+                      let safe = false;
+                      let entityType = "UNKNOWN";
+                      let label = "Unknown Hop";
+
+                      if (result.outflowContext && result.outflowContext.address.toLowerCase() === toId) {
+                        safe = result.outflowContext.safe;
+                        entityType = result.outflowContext.type;
+                        label = result.outflowContext.name;
+                      }
+
+                      nodes.push({
+                        id: toId,
+                        address: hop.outflowTo,
+                        label: label,
+                        entityType: entityType,
+                        safe: safe,
+                        amount: hop.outflowAmount,
+                      });
+
+                      edges.push({
+                        from: hop.address.toLowerCase(),
+                        to: toId,
+                        label: `${hop.outflowAmount} ETH`,
+                        isRisky: !safe,
+                      });
+                    }
+                  });
+
+                  return <TransactionFlowChart centerAddress={result.address} nodes={nodes} edges={edges} />;
+                })()}
               </div>
             )}
 

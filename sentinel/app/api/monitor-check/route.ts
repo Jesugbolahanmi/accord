@@ -51,7 +51,7 @@ export async function GET(req: NextRequest) {
         const permits = await detectPermitTransactions(watch.address, transactions);
 
         // Full detection suite: rules + approvals + permits
-        const flags = await runAllChecks(
+        const { flags } = await runAllChecks(
           transactions,
           watch.address,
           approvalsData.activeApprovals,
