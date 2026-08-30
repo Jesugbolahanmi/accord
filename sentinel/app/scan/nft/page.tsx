@@ -3,17 +3,18 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { 
-  ArrowLeft, Activity, ShieldAlert, ShieldCheck, 
-  Image as ImageIcon, Fingerprint, Info, AlertTriangle, Shield, CheckCircle2
+  Search, Activity, ShieldAlert, ShieldCheck, 
+  Image as ImageIcon, Fingerprint, Info, AlertTriangle, Shield, CheckCircle2,
+  TerminalSquare, Cpu, Send
 } from "lucide-react";
 
 const INVESTIGATION_STEPS = [
-  "Resolving contract on Base...",
-  "Fetching collection metadata...",
-  "Tracing deployer wallet history...",
-  "Checking transfer & mint patterns...",
-  "Auditing ownership concentration...",
-  "Compiling threat report...",
+  "RESOLVING_CONTRACT_BYTECODE",
+  "FETCHING_COLLECTION_METADATA",
+  "TRACING_DEPLOYER_FOOTPRINT",
+  "CHECKING_TRANSFER_PATTERNS",
+  "AUDITING_OWNERSHIP_CONCENTRATION",
+  "COMPILING_THREAT_REPORT",
 ];
 
 export default function NFTScan() {
@@ -35,7 +36,7 @@ export default function NFTScan() {
         }
         return prev + 1;
       });
-    }, 700);
+    }, 400);
     return () => clearInterval(interval);
   }, [loading]);
 
@@ -46,7 +47,9 @@ export default function NFTScan() {
     return () => clearTimeout(timer);
   }, [result]);
 
-  async function handleInvestigate() {
+  async function handleInvestigate(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    if (!address) return;
     setLoading(true);
     setError("");
     setResult(null);
@@ -58,316 +61,276 @@ export default function NFTScan() {
       });
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error || "Something went wrong");
+        setError(data.error || "SYSTEM_FAILURE");
       } else {
         setResult(data);
       }
     } catch {
-      setError("Failed to reach the server");
+      setError("NETWORK_DISCONNECT");
     } finally {
       setLoading(false);
     }
   }
 
   const severityColor = (level: string) => {
-    if (level === "CRITICAL" || level === "HIGH") return "#FF3B3B";
+    if (level === "CRITICAL" || level === "HIGH") return "#FF1E1E";
     if (level === "MEDIUM") return "#FFB020";
-    return "#34D399";
-  };
-
-  const severityGlow = (level: string) => {
-    if (level === "CRITICAL" || level === "HIGH") return "rgba(255, 59, 59, 0.5)";
-    if (level === "MEDIUM") return "rgba(255, 176, 32, 0.5)";
-    return "rgba(52, 211, 153, 0.5)";
+    return "#00FF66";
   };
 
   return (
-    <main className="min-h-screen px-4 sm:px-6 py-8 sm:py-10 relative overflow-hidden bg-[#050505]">
-      {/* Background Cyber-grid */}
-      <div className="absolute inset-0 z-0 bg-[url('/grid.svg')] bg-center [mask-image:linear-gradient(180deg,white,rgba(255,255,255,0))] opacity-10 pointer-events-none" />
-      {/* NFT theme — purple primary glow */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-[#A855F7] opacity-[0.07] blur-[130px] rounded-full pointer-events-none" />
-      <div className="absolute bottom-0 left-0 w-[500px] h-[300px] bg-[#7C3AED] opacity-[0.04] blur-[120px] rounded-full pointer-events-none" />
-
-      <div className="max-w-3xl mx-auto relative z-10">
-        {/* Back nav */}
-        <Link
-          href="/scan"
-          className="group flex items-center gap-2 font-[family-name:var(--font-mono)] text-xs text-[#7C8394] hover:text-[#A855F7] transition-colors mb-8 w-fit"
-        >
-          <ArrowLeft size={14} className="group-hover:-translate-x-1 transition-transform" /> 
-          RETURN TO DASHBOARD
-        </Link>
-
-        {/* Header */}
-        <div className="flex flex-col gap-2 mb-10">
-          <div className="flex items-center gap-3">
-            <div className="relative flex items-center justify-center w-3 h-3">
-              <span className="absolute w-full h-full rounded-full bg-[#A855F7] opacity-75 animate-ping" />
-              <span className="relative w-2 h-2 rounded-full bg-[#A855F7]" />
-            </div>
-            <h1 className="font-[family-name:var(--font-display)] text-2xl sm:text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400">
-              NFT SCANNER
-            </h1>
-          </div>
-          <p className="font-[family-name:var(--font-mono)] text-sm text-[#7C8394] ml-6">
-            // analyze collection integrity &amp; deployer footprint
-          </p>
+    <main className="h-full flex flex-col bg-black text-white overflow-hidden relative">
+      
+      {/* Top Header / Search Bar */}
+      <header className="h-14 shrink-0 border-b border-white/5 bg-[#050505] flex items-center px-4 justify-between z-20 relative">
+        <div className="flex items-center gap-4">
+          <TerminalSquare size={16} className="text-[#00E5FF]" />
+          <span className="font-[family-name:var(--font-mono)] text-[10px] tracking-widest uppercase text-[#888888]">
+            MOD: NFT_FORENSICS
+          </span>
         </div>
-
-        {/* Input section */}
-        <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 sm:p-6 mb-8 shadow-2xl transition-all duration-300 hover:border-white/20 hover:bg-white/10 relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-32 h-32 bg-[#A855F7]/10 blur-3xl rounded-full" />
-          
-          <div className="flex flex-col sm:flex-row gap-3 relative z-10">
-            <div className="relative flex-1 group">
-              <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
-                <ImageIcon size={18} className="text-[#7C8394] group-focus-within:text-[#A855F7] transition-colors" />
-              </div>
-              <input
-                type="text"
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && !loading && address && handleInvestigate()}
-                placeholder="Enter NFT contract address (0x...)"
-                className="w-full bg-black/40 border border-white/10 rounded-xl pl-12 pr-4 py-4 text-[#E6E8EC] placeholder-[#4a5063] font-[family-name:var(--font-mono)] text-sm focus:outline-none focus:border-[#A855F7] focus:ring-1 focus:ring-[#A855F7] transition-all"
-              />
-            </div>
-            <button
-              onClick={handleInvestigate}
-              disabled={loading || !address}
-              className="bg-gradient-to-r from-[#A855F7] to-[#9333ea] hover:from-[#9333ea] hover:to-[#7e22ce] disabled:from-[#242938] disabled:to-[#242938] disabled:text-[#4a5063] disabled:cursor-not-allowed text-white rounded-xl px-8 py-4 font-bold font-[family-name:var(--font-mono)] text-sm transition-all shadow-[0_0_20px_rgba(168,85,247,0.3)] hover:shadow-[0_0_30px_rgba(168,85,247,0.5)] disabled:shadow-none flex items-center justify-center gap-2 sm:min-w-[140px]"
-            >
-              {loading ? (
-                <><Activity size={16} className="animate-spin" /> SCANNING</>
-              ) : "INVESTIGATE"}
-            </button>
+        
+        <form onSubmit={handleInvestigate} className="flex-1 max-w-xl mx-auto flex items-center bg-black border border-white/10 group focus-within:border-[#00E5FF]/50 transition-colors">
+          <div className="pl-3">
+            <Search size={14} className="text-[#4a5063] group-focus-within:text-[#00E5FF]" />
           </div>
+          <input
+            type="text"
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+            placeholder="Collection Address (0x...)"
+            className="flex-1 bg-transparent border-none text-white font-[family-name:var(--font-mono)] text-xs px-3 py-2 focus:outline-none focus:ring-0 placeholder-[#4a5063]"
+          />
+          <button
+            type="submit"
+            disabled={loading || !address}
+            className="bg-white/5 hover:bg-[#00E5FF] hover:text-black text-[#888888] px-4 py-2 text-[10px] font-bold font-[family-name:var(--font-mono)] transition-colors border-l border-white/10 disabled:opacity-50"
+          >
+            {loading ? "SCANNING..." : "EXECUTE"}
+          </button>
+        </form>
+
+        <div className="flex items-center gap-2">
+          {error && <span className="text-[10px] text-[#FF1E1E] font-[family-name:var(--font-mono)] tracking-widest mr-4">{error}</span>}
+          <div className="w-1.5 h-1.5 bg-[#00FF66] rounded-full animate-pulse" />
         </div>
+      </header>
 
-        {error && (
-          <div className="bg-[#FF3B3B]/10 border border-[#FF3B3B]/30 rounded-xl p-4 mb-8 text-[#FF3B3B] font-[family-name:var(--font-mono)] text-sm flex items-center gap-3 animate-in">
-            <ShieldAlert size={18} /> {error}
+      {/* Main Content Area */}
+      <div className="flex-1 p-1 overflow-hidden relative">
+        {!result && !loading ? (
+          // Empty State
+          <div className="w-full h-full border border-white/5 bg-[#050505] flex items-center justify-center flex-col relative overflow-hidden">
+            <div className="absolute inset-0 bg-[url('/grid.svg')] bg-center opacity-[0.03] pointer-events-none" style={{ backgroundSize: '30px' }} />
+            <Cpu size={48} className="text-white/10 mb-4" />
+            <h2 className="font-[family-name:var(--font-display)] text-2xl font-black uppercase tracking-widest text-[#4a5063]">
+              AWAITING_INPUT
+            </h2>
           </div>
-        )}
-
-        {/* ── Animated Terminal Loader ── */}
-        {loading && (
-          <div className="bg-black/40 backdrop-blur-xl border border-white/10 rounded-2xl p-6 sm:p-8 mb-6 relative overflow-hidden animate-in">
-            {/* Animated radar rings */}
-            <div className="absolute top-1/2 right-6 sm:right-10 -translate-y-1/2 w-40 h-40 rounded-full border border-[#A855F7]/20 animate-radar opacity-50" />
-            <div className="absolute top-1/2 right-6 sm:right-10 -translate-y-1/2 w-24 h-24 rounded-full border border-[#A855F7]/10 animate-radar opacity-30" style={{ animationDelay: "0.8s" }} />
-
-            <div className="space-y-4 font-[family-name:var(--font-mono)] text-sm relative z-10">
-              <p className="text-[#A855F7] text-xs uppercase tracking-widest mb-5 flex items-center gap-2">
-                <Activity size={12} className="animate-spin" /> SENTINEL NFT ANALYSIS RUNNING
-              </p>
-              {INVESTIGATION_STEPS.map((step, i) => (
-                <div
-                  key={i}
-                  className={"flex items-center gap-4 transition-all duration-500 " +
-                    (i < currentStep ? "text-[#34D399] opacity-100 translate-x-0" :
-                     i === currentStep ? "text-[#A855F7] opacity-100 translate-x-2" :
-                     "text-[#7C8394] opacity-30 translate-x-0")}
-                >
-                  <span className="w-5 shrink-0 flex justify-center">
-                    {i < currentStep ? <CheckCircle2 size={16} /> : i === currentStep ? <Activity size={16} className="animate-spin" /> : "·"}
-                  </span>
-                  <span>
-                    {step}
-                    {i === currentStep && <span className="animate-blink ml-1">_</span>}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* ── Results ── */}
-        {result && !loading && (
-          <div className="space-y-6 animate-in">
-
-            {/* Primary Threat Score Card */}
-            <div 
-              className="relative overflow-hidden bg-black/40 backdrop-blur-xl border border-white/10 rounded-3xl p-6 sm:p-8"
-              style={{ boxShadow: `0 0 40px -10px ${severityGlow(result.report.threatLevel)}` }}
-            >
-              <div 
-                className="absolute inset-0 opacity-10 pointer-events-none" 
-                style={{ 
-                  background: `radial-gradient(circle at top right, ${severityColor(result.report.threatLevel)}, transparent 70%)` 
-                }} 
-              />
-              
-              <div className="relative z-10 flex flex-col md:flex-row items-center md:items-start gap-8 justify-between">
-                <div className="flex-1 w-full">
-                  <div className="flex flex-wrap items-center gap-3 mb-6">
-                    <span className="text-[#7C8394] font-[family-name:var(--font-mono)] text-sm uppercase tracking-wider flex items-center gap-2">
-                      <ShieldCheck size={16} /> Threat Analysis
+        ) : loading ? (
+          // Loading Matrix
+          <div className="w-full h-full border border-white/5 bg-[#050505] flex items-center justify-center relative overflow-hidden">
+             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full border border-[#00E5FF]/10 animate-radar opacity-50" />
+             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] rounded-full border border-[#00E5FF]/20 animate-radar" style={{animationDelay: '0.5s'}} />
+             
+             <div className="font-[family-name:var(--font-mono)] text-xs text-[#00E5FF] flex flex-col gap-2 relative z-10 w-80">
+               {INVESTIGATION_STEPS.map((step, i) => (
+                  <div key={i} className={`flex items-center gap-3 transition-opacity duration-300 ${i <= currentStep ? 'opacity-100' : 'opacity-0'}`}>
+                    <span className="w-4 shrink-0">
+                      {i < currentStep ? <CheckCircle2 size={14} className="text-[#00FF66]"/> : i === currentStep ? <Activity size={14} className="animate-spin text-[#00E5FF]"/> : ""}
                     </span>
-                    <span
-                      className="px-4 py-1.5 rounded-full text-xs font-bold font-[family-name:var(--font-mono)] tracking-wider"
-                      style={{
-                        color: severityColor(result.report.threatLevel),
-                        backgroundColor: `${severityColor(result.report.threatLevel)}1A`,
-                        border: `1px solid ${severityColor(result.report.threatLevel)}40`
-                      }}
-                    >
-                      {result.report.threatLevel} RISK
+                    <span className={`${i === currentStep ? "text-[#00E5FF] font-bold" : "text-[#888888]"}`}>
+                      &gt; {step}
                     </span>
                   </div>
-                  <p className="text-[#E6E8EC] text-base sm:text-lg leading-relaxed">{result.report.summary}</p>
+               ))}
+             </div>
+          </div>
+        ) : (
+          // Results Dashboard Layout (4 Columns Grid)
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-1 h-full">
+            
+            {/* COLUMN 1: Threat Score & Feed */}
+            <div className="col-span-1 flex flex-col gap-1 overflow-hidden">
+              {/* Score Widget */}
+              <div className="border border-white/5 bg-[#050505] p-5 shrink-0 relative overflow-hidden group">
+                <div className="absolute top-0 right-0 w-32 h-32 blur-[50px] opacity-20 pointer-events-none" style={{ backgroundColor: severityColor(result.report.threatLevel) }} />
+                
+                <h3 className="font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-widest text-[#888888] mb-4 flex items-center gap-2">
+                  <ShieldCheck size={12} /> THREAT_ANALYSIS
+                </h3>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-[10px] font-bold font-[family-name:var(--font-mono)] px-2 py-0.5 inline-block mb-2 border" 
+                      style={{ color: severityColor(result.report.threatLevel), borderColor: `${severityColor(result.report.threatLevel)}40`, backgroundColor: `${severityColor(result.report.threatLevel)}10` }}>
+                      {result.report.threatLevel}_RISK
+                    </div>
+                    <div className="font-[family-name:var(--font-display)] text-5xl font-black" style={{ color: severityColor(result.report.threatLevel) }}>
+                      {displayScore}
+                    </div>
+                  </div>
                 </div>
                 
-                {/* Animated Score Ring */}
-                <div className="flex flex-col items-center justify-center shrink-0">
-                  <div className="relative flex items-center justify-center w-28 h-28 sm:w-32 sm:h-32">
-                    <svg className="w-full h-full -rotate-90" viewBox="0 0 100 100">
-                      <circle cx="50" cy="50" r="45" fill="none" stroke="currentColor" strokeWidth="8" className="text-white/10" />
-                      <circle 
-                        cx="50" cy="50" r="45" fill="none" stroke="currentColor" strokeWidth="8" 
-                        strokeLinecap="round"
-                        strokeDasharray="282.7"
-                        strokeDashoffset={282.7 - (282.7 * displayScore) / 100}
-                        style={{ color: severityColor(result.report.threatLevel) }}
-                        className="transition-all duration-1000 ease-out"
-                      />
-                    </svg>
-                    <div className="absolute flex flex-col items-center justify-center">
-                      <span className="text-3xl sm:text-4xl font-bold font-[family-name:var(--font-display)]" style={{ color: severityColor(result.report.threatLevel) }}>
-                        {displayScore}
-                      </span>
-                      <span className="text-[10px] font-bold font-[family-name:var(--font-mono)] text-[#7C8394] uppercase tracking-widest mt-1">
-                        Score
-                      </span>
-                    </div>
-                  </div>
-                </div>
+                <p className="mt-4 text-[11px] text-[#AAAAAA] leading-relaxed line-clamp-4 font-[family-name:var(--font-mono)]">
+                  {result.report.summary}
+                </p>
               </div>
-            </div>
 
-            {/* Collection Info + Deployer Footprint Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
-              {/* Collection Info */}
-              {result.metadata && (
-                <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-5 sm:p-6 hover:bg-white/10 transition-colors">
-                  <h3 className="font-[family-name:var(--font-mono)] text-xs text-[#7C8394] mb-5 flex items-center gap-2">
-                    <Info size={16} /> COLLECTION_INFO
+              {/* Detected Flags Feed */}
+              <div className="border border-white/5 bg-[#050505] flex-1 flex flex-col overflow-hidden relative">
+                <div className="p-3 border-b border-white/5 shrink-0">
+                  <h3 className="font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-widest text-[#FF1E1E] flex items-center gap-2">
+                    <ShieldAlert size={12} /> THREAT_LOGS [{result.flags?.length || 0}]
                   </h3>
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center pb-3 border-b border-white/5">
-                      <span className="text-[#7C8394] text-sm">Name</span>
-                      <span className="text-[#E6E8EC] font-bold truncate max-w-[150px]">
-                        {result.metadata.name || result.metadata.openSeaMetadata?.collectionName || "Unknown"}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center pb-3 border-b border-white/5">
-                      <span className="text-[#7C8394] text-sm">Symbol</span>
-                      <span className="font-[family-name:var(--font-mono)] bg-[#A855F7]/10 border border-[#A855F7]/20 text-[#A855F7] px-2 py-0.5 rounded font-bold">
-                        {result.metadata.symbol || "Unknown"}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center pb-3 border-b border-white/5">
-                      <span className="text-[#7C8394] text-sm">Type</span>
-                      <span className="text-[#E6E8EC] font-[family-name:var(--font-mono)]">{result.metadata.tokenType || "Unknown"}</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-[#7C8394] text-sm">Total Supply</span>
-                      <span className="text-[#E6E8EC] font-[family-name:var(--font-mono)] tabular-nums">{result.metadata.totalSupply || "Unknown"}</span>
-                    </div>
-                  </div>
                 </div>
-              )}
-
-              {/* Deployer Footprint */}
-              {result.deployerReport && (
-                <div className={`bg-white/5 backdrop-blur-xl rounded-2xl p-5 sm:p-6 hover:bg-white/10 transition-colors flex flex-col h-full ${result.deployerReport.flags.length > 0 ? "border border-[#FF3B3B]/25 bg-[#120808]/60" : "border border-white/10"}`}>
-                  <h3 className="font-[family-name:var(--font-mono)] text-xs text-[#7C8394] mb-4 flex items-center gap-2">
-                    <Fingerprint size={16} /> DEPLOYER_FOOTPRINT
-                  </h3>
-                  
-                  <div className="mb-4">
-                    <span className="text-[#7C8394] text-xs uppercase mr-2">Address:</span>
-                    <a
-                      href={"https://basescan.org/address/" + result.deployerReport.address}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[#38BDF8] hover:underline font-[family-name:var(--font-mono)] text-xs font-bold"
-                    >
-                      {result.deployerReport.address.slice(0,10)}...{result.deployerReport.address.slice(-8)} ↗
-                    </a>
-                  </div>
-
-                  <div className="grow">
-                    {result.deployerReport.flags.length > 0 ? (
-                      <div className="space-y-3 font-[family-name:var(--font-mono)] text-xs">
-                        {result.deployerReport.flags.map((flag: any, i: number) => (
-                          <div 
-                            key={i} 
-                            className="flex items-start gap-3 bg-black/60 rounded-xl p-3"
-                            style={{ borderLeft: `3px solid ${flag.severity === "high" ? "#FF3B3B" : flag.severity === "medium" ? "#FFB020" : "#7C8394"}` }}
-                          >
-                            <span className="shrink-0 mt-0.5" style={{ color: flag.severity === "high" ? "#FF3B3B" : flag.severity === "medium" ? "#FFB020" : "#7C8394" }}>
-                              <AlertTriangle size={14} />
-                            </span>
-                            <span className="text-[#B4B9C4] leading-relaxed">{flag.message}</span>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="flex flex-col items-center justify-center text-center h-full gap-2 p-4 bg-black/40 border border-[#34D399]/20 rounded-xl">
-                        <Shield size={24} className="text-[#34D399]" />
-                        <p className="text-[#34D399] text-xs font-[family-name:var(--font-mono)]">
-                          Deployer&apos;s onchain history appears clean.
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Detected Flags */}
-            {result.flags && result.flags.length > 0 && (
-              <div className="bg-[#120808]/80 backdrop-blur-xl border border-[#FF3B3B]/20 rounded-2xl p-5 sm:p-6 relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-48 h-48 bg-[#FF3B3B]/5 blur-3xl rounded-full" />
-                <h3 className="font-[family-name:var(--font-mono)] text-xs text-[#FF3B3B] mb-5 flex items-center gap-2 relative z-10">
-                  <AlertTriangle size={16} /> DETECTED_FLAGS [{result.flags.length}]
-                </h3>
-                <div className="space-y-3 relative z-10">
-                  {result.flags.map((flag: any, i: number) => (
-                    <div 
-                      key={i} 
-                      className="flex items-start gap-4 bg-black/60 rounded-xl p-4 transition-colors hover:bg-black/80"
-                      style={{ borderLeft: `3px solid ${flag.severity === "high" ? "#FF3B3B" : flag.severity === "medium" ? "#FFB020" : "#38BDF8"}` }}
-                    >
-                      <span
-                        className="mt-0.5 shrink-0"
-                        style={{ color: flag.severity === "high" ? "#FF3B3B" : flag.severity === "medium" ? "#FFB020" : "#38BDF8" }}
-                      >
-                        <ShieldAlert size={18} />
-                      </span>
-                      <div>
-                        <span 
-                          className="text-xs font-bold font-[family-name:var(--font-mono)] tracking-wider block mb-1"
-                          style={{ color: flag.severity === "high" ? "#FF3B3B" : flag.severity === "medium" ? "#FFB020" : "#38BDF8" }}
-                        >
-                          {flag.severity.toUpperCase()} RISK
-                        </span>
-                        <p className="text-[#B4B9C4] text-sm leading-relaxed">{flag.message}</p>
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-2">
+                  {result.flags?.map((flag: any, i: number) => (
+                    <div key={i} className="bg-black/40 border border-white/5 p-3 text-[10px] font-[family-name:var(--font-mono)] hover:border-white/20 transition-colors group">
+                      <div className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full mt-1 shrink-0" style={{ backgroundColor: flag.severity === "high" ? "#FF1E1E" : flag.severity === "medium" ? "#FFB020" : "#00E5FF" }} />
+                        <span className="text-[#AAAAAA] leading-relaxed">{flag.message}</span>
                       </div>
                     </div>
                   ))}
+                  {(!result.flags || result.flags.length === 0) && (
+                    <div className="text-[#00FF66] text-[10px] font-[family-name:var(--font-mono)] text-center mt-10">
+                      NO_THREATS_DETECTED
+                    </div>
+                  )}
                 </div>
               </div>
-            )}
+            </div>
 
-            {result.flags && result.flags.length === 0 && (
-              <div className="bg-black/40 border border-[#34D399]/20 rounded-xl p-4 text-center text-[#34D399] text-xs font-[family-name:var(--font-mono)] flex flex-col items-center gap-2 shadow-[0_0_15px_rgba(52,211,153,0.05)]">
-                <CheckCircle2 size={24} />
-                No threat flags detected. Collection appears clean.
+            {/* COLUMN 2 & 3: Collection Info & Deployer */}
+            <div className="col-span-1 lg:col-span-2 flex flex-col gap-1 overflow-hidden">
+              
+              <div className="flex gap-1 h-1/2">
+                {/* Collection Info Card */}
+                <div className="border border-white/5 bg-[#050505] flex-1 overflow-hidden flex flex-col">
+                  <div className="p-3 border-b border-white/5 shrink-0 flex items-center justify-between">
+                    <h3 className="font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-widest text-[#888888] flex items-center gap-2">
+                      <Info size={12} /> COLLECTION_INFO
+                    </h3>
+                  </div>
+                  
+                  <div className="flex-1 overflow-y-auto custom-scrollbar p-3 text-[10px] font-[family-name:var(--font-mono)] flex flex-col justify-center">
+                    {result.metadata ? (
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center bg-black/40 border border-white/5 px-3 py-3 hover:bg-white/5 transition-colors">
+                          <span className="text-[#888888]">NAME</span>
+                          <span className="text-white font-bold">{result.metadata.name || result.metadata.openSeaMetadata?.collectionName || "UNKNOWN"}</span>
+                        </div>
+                        <div className="flex justify-between items-center bg-black/40 border border-white/5 px-3 py-3 hover:bg-white/5 transition-colors">
+                          <span className="text-[#888888]">SYMBOL</span>
+                          <span className="bg-[#00E5FF]/10 text-[#00E5FF] border border-[#00E5FF]/20 px-2 py-0.5">{result.metadata.symbol || "UNKNOWN"}</span>
+                        </div>
+                        <div className="flex justify-between items-center bg-black/40 border border-white/5 px-3 py-3 hover:bg-white/5 transition-colors">
+                          <span className="text-[#888888]">TOKEN_TYPE</span>
+                          <span className="text-white">{result.metadata.tokenType || "UNKNOWN"}</span>
+                        </div>
+                        <div className="flex justify-between items-center bg-black/40 border border-white/5 px-3 py-3 hover:bg-white/5 transition-colors">
+                          <span className="text-[#888888]">TOTAL_SUPPLY</span>
+                          <span className="text-white">{result.metadata.totalSupply || "UNKNOWN"}</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-[#4a5063]">DATA_UNAVAILABLE</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Deployer Footprint Card */}
+                <div className="border border-white/5 bg-[#050505] flex-1 overflow-hidden flex flex-col">
+                  <div className="p-3 border-b border-white/5 shrink-0">
+                    <h3 className="font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-widest text-[#888888] flex items-center gap-2">
+                      <Fingerprint size={12} /> DEPLOYER_FOOTPRINT
+                    </h3>
+                  </div>
+                  
+                  <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-1 text-[10px] font-[family-name:var(--font-mono)]">
+                    {result.deployerReport ? (
+                      <>
+                        <div className="mb-4 bg-black/40 border border-white/5 p-3">
+                          <span className="text-[#888888] block mb-1">DEPLOYER_ADDRESS:</span>
+                          <a
+                            href={"https://basescan.org/address/" + result.deployerReport.address}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[#00E5FF] hover:underline font-bold"
+                          >
+                            {result.deployerReport.address} ↗
+                          </a>
+                        </div>
+                        
+                        {result.deployerReport.flags.length > 0 ? (
+                          <div className="space-y-2">
+                            {result.deployerReport.flags.map((flag: any, i: number) => (
+                              <div key={i} className="bg-black/40 border border-white/5 p-3 flex items-start gap-2">
+                                <span className="mt-0.5" style={{ color: flag.severity === "high" ? "#FF1E1E" : flag.severity === "medium" ? "#FFB020" : "#888888" }}>
+                                  <AlertTriangle size={12} />
+                                </span>
+                                <span className="text-[#AAAAAA]">{flag.message}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-center justify-center text-center py-6 gap-2 text-[#00FF66]">
+                            <Shield size={20} className="text-[#00FF66]" />
+                            <p>DEPLOYER_HISTORY_CLEAN</p>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-[#4a5063]">FOOTPRINT_DATA_UNAVAILABLE</div>
+                    )}
+                  </div>
+                </div>
               </div>
-            )}
+
+              {/* Bottom Pane (Graph/Transfer patterns placeholder if needed later) */}
+              <div className="flex gap-1 h-1/2">
+                <div className="border border-white/5 bg-[#050505] flex-1 overflow-hidden flex flex-col relative items-center justify-center">
+                  <div className="absolute inset-0 bg-[url('/grid.svg')] bg-center opacity-[0.03] pointer-events-none" />
+                  <ImageIcon size={32} className="text-[#4a5063] mb-2 opacity-50" />
+                  <span className="text-[10px] text-[#4a5063] font-[family-name:var(--font-mono)] uppercase tracking-widest">
+                    VISUAL_FORENSICS_OFFLINE
+                  </span>
+                </div>
+              </div>
+
+            </div>
+
+            {/* COLUMN 4: AI Chat Copilot (Placeholder for NFT) */}
+            <div className="col-span-1 border border-white/5 bg-[#050505] flex flex-col overflow-hidden relative opacity-50">
+              <div className="absolute top-0 right-0 w-full h-1 bg-gradient-to-r from-transparent to-[#00E5FF] opacity-20" />
+              <div className="p-3 border-b border-white/5 shrink-0 bg-black/50 backdrop-blur-sm relative z-10">
+                <h3 className="font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-widest text-[#00E5FF] flex items-center gap-2">
+                  <Cpu size={12} /> SENTINEL_AI_CORE
+                </h3>
+              </div>
+
+              <div className="flex-1 overflow-y-auto custom-scrollbar p-3 flex items-center justify-center flex-col text-center">
+                 <TerminalSquare size={24} className="text-[#4a5063] mb-2" />
+                 <span className="text-[10px] text-[#4a5063] font-[family-name:var(--font-mono)] uppercase tracking-widest">
+                   AI_CORE_OFFLINE<br/>FOR_NFT_ANALYSIS
+                 </span>
+              </div>
+
+              <div className="p-2 border-t border-white/5 bg-black shrink-0 relative z-10">
+                <div className="flex bg-black border border-white/10 opacity-50 cursor-not-allowed">
+                  <input
+                    type="text"
+                    disabled
+                    placeholder="Module Unavailable..."
+                    className="flex-1 bg-transparent border-none text-white text-[10px] font-[family-name:var(--font-mono)] p-3 focus:outline-none focus:ring-0 placeholder-[#4a5063] cursor-not-allowed"
+                  />
+                  <button disabled className="bg-white/5 text-[#4a5063] px-3 flex items-center justify-center border-l border-white/10 cursor-not-allowed">
+                    <Send size={12} />
+                  </button>
+                </div>
+              </div>
+            </div>
 
           </div>
         )}

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getWalletTransactions, classifyAddress } from "@/lib/basescan";
 import { runAllChecks } from "@/lib/rules";
 import { generateThreatReport } from "@/lib/report";
-import { traceFunds } from "@/lib/trace";
+import { traceFundsTree } from "@/lib/trace";
 import { getActiveApprovals, detectPermitTransactions } from "@/lib/approvals";
 import { getWalletFirstTransaction, resolveCounterparty, KNOWN_ENTITIES } from "@/lib/graph";
 
@@ -89,11 +89,25 @@ export async function POST(req: NextRequest) {
 
     const report = await generateThreatReport(address, flags);
 
-    // Build fund trace: start from the destination of the outflow and follow forward
-    // Always trace when there's a large outflow flag (even if downgraded to low severity)
+    // Build fund trace tree: BFS from the largest outflow destination, top-3 per hop, 2 hops deep
     const hasOutflow = flags.some((f) => f.type === "LARGE_OUTFLOW");
     const traceStartAddress = outflowDestination || address;
-    const trail = hasOutflow ? await traceFunds(traceStartAddress, 4) : [];
+    const traceTree = hasOutflow
+      ? await traceFundsTree(traceStartAddress, 2, 3)
+      : { nodes: [], edges: [] };
+
+    // Also keep legacy trail for backward compat (the hop-summary list in the UI)
+    const trail = traceTree.nodes.length > 0
+      ? traceTree.nodes
+          .filter((n) => !n.isCenter)
+          .map((n) => ({
+            address: n.address,
+            label: n.label,
+            entityType: n.entityType,
+            safe: n.safe,
+            isFresh: n.isFresh,
+          }))
+      : [];
 
     return NextResponse.json({
       address,
@@ -101,6 +115,7 @@ export async function POST(req: NextRequest) {
       flags,
       report,
       trail,
+      traceTree,        // ← branching tree for the graph visualizer
       outflowContext,
       activeApprovals: approvalsData.activeApprovals,
       permits,

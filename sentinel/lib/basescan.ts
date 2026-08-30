@@ -10,7 +10,7 @@ const ALCHEMY_URL = `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
 
 async function alchemyCall(method: string, params: any[]) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+  const timeout = setTimeout(() => controller.abort(), 15000);
 
   try {
     const res = await fetch(ALCHEMY_URL, {
@@ -48,22 +48,20 @@ export async function getWalletTransactions(address: string) {
     }]),
   ]);
 
-
   const all = [...(outgoing?.transfers || []), ...(incoming?.transfers || [])];
 
- return all
-  .map((t: any) => ({
-    from: t.from,
-    to: t.to,
-    value: t.rawContract?.value || "0",
-    decimal: t.rawContract?.decimal ? parseInt(t.rawContract.decimal, 16) : 18,
-    timeStamp: Math.floor(new Date(t.metadata.blockTimestamp).getTime() / 1000).toString(),
-    hash: t.hash,
-    asset: t.asset || "",
-  }))
-  .sort((a, b) => parseInt(b.timeStamp) - parseInt(a.timeStamp));
+  return all
+    .map((t: any) => ({
+      from: t.from,
+      to: t.to,
+      value: t.rawContract?.value || "0",
+      decimal: t.rawContract?.decimal ? parseInt(t.rawContract.decimal, 16) : 18,
+      timeStamp: Math.floor(new Date(t.metadata.blockTimestamp).getTime() / 1000).toString(),
+      hash: t.hash,
+      asset: t.asset || "",
+    }))
+    .sort((a, b) => parseInt(b.timeStamp) - parseInt(a.timeStamp));
 }
-
 
 export async function getTokenMetadata(address: string) {
   const metadata = await alchemyCall("alchemy_getTokenMetadata", [address]);
@@ -75,11 +73,19 @@ export async function isContract(address: string) {
   return code && code !== "0x";
 }
 
-
+// Mock addresses for internal UI testing — bypasses Alchemy activity check
+const MOCK_CONTRACT_ADDRESSES = new Set([
+  "0xdeadbeef00000000000000000000000000000000",
+]);
 
 export async function classifyAddress(address: string) {
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
     return { valid: false, reason: "Not a valid address format (must be 0x followed by 40 hex characters)." };
+  }
+
+  // Bypass on-chain validation for internal mock addresses
+  if (MOCK_CONTRACT_ADDRESSES.has(address.toLowerCase())) {
+    return { valid: true, isContract: true, hasActivity: true, reason: null };
   }
 
   const code = await alchemyCall("eth_getCode", [address, "latest"]);
@@ -155,10 +161,34 @@ export async function getNFTMetadata(address: string) {
   const data = await res.json();
   return data;
 }
+
 export async function getGoPlusSecurity(address: string) {
   try {
+    // MOCK TEST ADDRESS FOR UI VALIDATION — simulates a confirmed honeypot
+    if (address.toLowerCase() === "0xdeadbeef00000000000000000000000000000000") {
+      return {
+        isHoneypot: true,
+        cannotBuy: false,
+        buyTax: 0,
+        sellTax: 99.9,
+        isOpenSource: false,
+        isProxy: true,
+        ownerAddress: "0xDEAD000000000000000000000000000000000001",
+        creatorAddress: "0xDEAD000000000000000000000000000000000001",
+        ownerRenounced: false,
+        creatorMadeHoneypot: true,
+        holderCount: 1420,
+        top10HolderPercent: 95.5,
+        isTrusted: false,
+        isInCex: false,
+        cexList: [],
+        tokenName: "SCAM TEST TOKEN",
+        tokenSymbol: "SCAM",
+      };
+    }
+
     const res = await fetch(
-      `https://api.gopluslabs.io/api/v1/token_security/8453?contract_addresses=`,
+      `https://api.gopluslabs.io/api/v1/token_security/8453?contract_addresses=${address}`,
       { headers: { accept: "application/json" } }
     );
     const data = await res.json();
