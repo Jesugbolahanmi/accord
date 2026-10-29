@@ -165,26 +165,41 @@ export default function SharedTradeRoomPage({
   };
 
   const askContextAssistant = async (questionText: string) => {
-    if (!questionText.trim() || !trade) return;
+    const trimmed = questionText.trim();
+    if (!trimmed || !trade) return;
     setAskingAssistant(true);
-    setAssistantQuestion(questionText);
     try {
       const res = await fetch("/api/assistant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          question: questionText,
+          question: trimmed,
           tradeId: trade.id,
           tradeRef: trade.reference,
           currentUser: activeActor || trade.buyer,
+          txHash: trade.txHash || undefined,
+          clientTradeSnapshot: trade,
         }),
       });
       const data = await res.json();
       if (data.success) {
-        setAssistantResponse(data);
+        setAssistantResponse({ ...data, question: data.question || trimmed });
+        setAssistantQuestion("");
+      } else {
+        setAssistantResponse({
+          question: trimmed,
+          answer: `Unable to process inquiry: ${data.error || "Unknown error"}`,
+          verifiedFacts: [],
+          userClaims: [],
+        });
       }
-    } catch (err) {
-      console.error("Assistant error:", err);
+    } catch (err: any) {
+      setAssistantResponse({
+        question: trimmed,
+        answer: `Assistant connection error: ${err?.message || "Failed to reach /api/assistant"}`,
+        verifiedFacts: [],
+        userClaims: [],
+      });
     } finally {
       setAskingAssistant(false);
     }
@@ -1100,7 +1115,19 @@ export default function SharedTradeRoomPage({
 
               {assistantResponse && !askingAssistant && (
                 <div className="p-4 rounded-[3px] bg-[#090A0C] border border-white/[0.1] space-y-3.5 text-[12px]">
-                  <p className="text-[#F4F2ED] leading-relaxed">{assistantResponse.answer}</p>
+                  {assistantResponse.question && (
+                    <div className="pb-2 border-b border-white/[0.06]">
+                      <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
+                        Inquiry
+                      </div>
+                      <div className="text-[12px] font-medium text-[#C5A46D] mt-0.5">
+                        {assistantResponse.question}
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-[#F4F2ED] leading-relaxed whitespace-pre-line">
+                    {assistantResponse.answer}
+                  </p>
 
                   {assistantResponse.verifiedFacts?.length > 0 && (
                     <div className="pt-2.5 border-t border-white/[0.07] space-y-1">
