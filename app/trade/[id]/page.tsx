@@ -1117,8 +1117,15 @@ export default function SharedTradeRoomPage({
                 <div className="p-4 rounded-[3px] bg-[#090A0C] border border-white/[0.1] space-y-3.5 text-[12px]">
                   {assistantResponse.question && (
                     <div className="pb-2 border-b border-white/[0.06]">
-                      <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
-                        Inquiry
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
+                          Inquiry
+                        </span>
+                        <span className="font-mono-tabular text-[10px] text-[#5CE0A8]">
+                          {assistantResponse.engineMode === "gemini_grounded"
+                            ? "Gemini 3.8 Grounded"
+                            : "Grounded Ledger Engine"}
+                        </span>
                       </div>
                       <div className="text-[12px] font-medium text-[#C5A46D] mt-0.5">
                         {assistantResponse.question}

@@ -243,6 +243,14 @@ export class AccordAIAssistant {
     });
 
     let engineMode: AccordContextResponse["engineMode"] = "grounded_deterministic";
+    if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+      try {
+        const dotenv = await import("dotenv");
+        dotenv.config({ path: ".env.local", override: true });
+      } catch {
+        // Ignore in edge/serverless environments without local filesystem .env.local
+      }
+    }
     const geminiKey = (
       process.env.GEMINI_API_KEY ||
       process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
@@ -314,10 +322,10 @@ export class AccordAIAssistant {
     const activeRoleLabel = isBuyer
       ? "Buyer"
       : isSeller
-      ? "Seller"
-      : isArbiter
-      ? "Neutral Arbiter"
-      : "Participant";
+        ? "Seller"
+        : isArbiter
+          ? "Neutral Arbiter"
+          : "Participant";
 
     // 1. Trade Room Age / Duration / When Created ("how long", "when was", "opened", "started", "created", "old", "age", "since when")
     if (
@@ -336,10 +344,10 @@ export class AccordAIAssistant {
         const elapsedStr = formatDurationHuman(Date.now() - createdMs);
         const createdTimeStr = trade.createdAt
           ? new Date(trade.createdAt).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            })
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          })
           : "recently";
         const remMs = (trade.expirationTimestamp || Date.now() + 86400000) - Date.now();
         const remStr = remMs > 0 ? formatDurationHuman(remMs) : "0 minutes (expired)";
@@ -600,11 +608,10 @@ You are currently viewing the room as the ${activeRoleLabel}.`;
       const doneConds = (trade.conditions || []).filter((c: any) => c.completed).length;
       const totalConds = (trade.conditions || []).length;
 
-      return `Trade ${trade.reference} (${trade.amount} ${trade.asset} on ${netName}) has been active for ${elapsedStr} and is currently in "${trade.status}" status with ${doneConds} of ${totalConds} conditions satisfied. ${
-        onchainVerification?.verified
+      return `Trade ${trade.reference} (${trade.amount} ${trade.asset} on ${netName}) has been active for ${elapsedStr} and is currently in "${trade.status}" status with ${doneConds} of ${totalConds} conditions satisfied. ${onchainVerification?.verified
           ? `The deposit is verified on-chain via Tatum RPC in Block #${onchainVerification.blockNumber}.`
           : `No on-chain deposit receipt has been verified via Tatum RPC yet.`
-      } Next step: ${outstandingActions[0] || "Buyer can now authorize final release to the Seller."}`;
+        } Next step: ${outstandingActions[0] || "Buyer can now authorize final release to the Seller."}`;
     }
 
     return `Accord Context Summary: ${verifiedFacts[0] || "Open a trade room to inspect live Tatum RPC receipts and Walrus Memory records."} ${outstandingActions[0] || ""}`;
@@ -626,10 +633,9 @@ You are currently viewing the room as the ${activeRoleLabel}.`;
     try {
       const { GoogleGenerativeAI } = await import("@google/generative-ai");
       const genAI = new GoogleGenerativeAI(params.apiKey);
-      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
       const prompt = `You are the Accord Context & Memory Assistant inside a peer-to-peer crypto settlement room.
-Answer the user's question directly and concisely (2-4 sentences) using ONLY the grounded data below.
+Answer the user's question directly, naturally, and concisely (2-4 sentences) using the grounded data below.
 Rules:
 1. Explicitly distinguish Verified On-Chain Facts (via Tatum RPC) from Off-Chain Participant Claims/Attestations.
 2. Never claim to retrain weights or modify parameters; context comes from Walrus Memory recall and Tatum RPC.
@@ -638,23 +644,22 @@ Rules:
 User Question: ${params.question}
 
 Trade Metadata:
-${
-  params.currentTrade
-    ? JSON.stringify({
-        reference: params.currentTrade.reference,
-        status: params.currentTrade.status,
-        amount: params.currentTrade.amount,
-        asset: params.currentTrade.asset,
-        network: params.currentTrade.network,
-        buyer: params.currentTrade.buyer,
-        seller: params.currentTrade.seller,
-        arbiter: params.currentTrade.arbiter,
-        createdAt: params.currentTrade.createdAt,
-        expirationTimestamp: params.currentTrade.expirationTimestamp,
-        agreedTerms: params.currentTrade.agreedTerms,
-      })
-    : "None"
-}
+${params.currentTrade
+          ? JSON.stringify({
+            reference: params.currentTrade.reference,
+            status: params.currentTrade.status,
+            amount: params.currentTrade.amount,
+            asset: params.currentTrade.asset,
+            network: params.currentTrade.network,
+            buyer: params.currentTrade.buyer,
+            seller: params.currentTrade.seller,
+            arbiter: params.currentTrade.arbiter,
+            createdAt: params.currentTrade.createdAt,
+            expirationTimestamp: params.currentTrade.expirationTimestamp,
+            agreedTerms: params.currentTrade.agreedTerms,
+          })
+          : "None"
+        }
 
 Verified Facts:
 ${params.verifiedFacts.join("\n")}
@@ -668,9 +673,23 @@ ${params.outstandingActions.join("\n") || "None"}
 Deterministic Baseline Answer:
 ${params.deterministicDraft}`;
 
-      const result = await model.generateContent(prompt);
-      const text = result.response.text()?.trim();
-      return text || null;
+      const candidateModels = [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-3.0-flash",
+        "gemini-2.5-flash",
+      ];
+      for (const modelName of candidateModels) {
+        try {
+          const model = genAI.getGenerativeModel({ model: modelName });
+          const result = await model.generateContent(prompt);
+          const text = result.response.text()?.trim();
+          if (text) return text;
+        } catch {
+          // Try next candidate model
+        }
+      }
+      return null;
     } catch (err: any) {
       console.warn("[AccordAI] Gemini synthesis unavailable, using deterministic engine:", err.message);
       return null;
