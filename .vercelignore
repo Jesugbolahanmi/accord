@@ -1,0 +1,6 @@
+.tools/
+.accord-data/
+.next/
+node_modules/
+.env*
+
