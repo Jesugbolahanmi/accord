@@ -6,9 +6,9 @@
  * 2. Persistent memories retrieved from Walrus Memory (`[Walrus Memory Mainnet]` / `[Walrus Memory Record]`)
  * 3. Participant-submitted attestations and claims (`[Participant Claim / Attestation]`)
  *
- * Works out-of-the-box with zero external LLM API keys via a comprehensive deterministic
- * trade-intelligence engine, and optionally enhances prose synthesis via Gemini
- * (`GEMINI_API_KEY` / `GOOGLE_GENERATIVE_AI_API_KEY`) when configured.
+ * Works out-of-the-box with zero external LLM API keys via a natural-language
+ * trade-intelligence engine, and automatically upgrades to LLM prose synthesis
+ * when `GEMINI_API_KEY` (or `GOOGLE_GENERATIVE_AI_API_KEY`) is configured.
  *
  * Security & Epistemic Rules:
  * - Explicitly separates verified on-chain facts from participant-submitted claims.
@@ -40,6 +40,33 @@ export interface AccordContextResponse {
   citedMemories: WalrusTradeMemory[];
   onchainVerification?: VerificationResult | null;
   timestamp: string;
+}
+
+function formatDurationHuman(ms: number): string {
+  const absMs = Math.max(0, Math.abs(ms));
+  const totalSeconds = Math.floor(absMs / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds} second${totalSeconds === 1 ? "" : "s"}`;
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    const secs = totalSeconds % 60;
+    return secs > 0
+      ? `${totalMinutes} minute${totalMinutes === 1 ? "" : "s"} and ${secs}s`
+      : `${totalMinutes} minute${totalMinutes === 1 ? "" : "s"}`;
+  }
+  const totalHours = Math.floor(totalMinutes / 60);
+  const remMinutes = totalMinutes % 60;
+  if (totalHours < 48) {
+    return remMinutes > 0
+      ? `${totalHours} hour${totalHours === 1 ? "" : "s"} and ${remMinutes} minute${remMinutes === 1 ? "" : "s"}`
+      : `${totalHours} hour${totalHours === 1 ? "" : "s"}`;
+  }
+  const days = Math.floor(totalHours / 24);
+  const remHours = totalHours % 24;
+  return remHours > 0
+    ? `${days} day${days === 1 ? "" : "s"} and ${remHours} hour${remHours === 1 ? "" : "s"}`
+    : `${days} day${days === 1 ? "" : "s"}`;
 }
 
 export class AccordAIAssistant {
@@ -201,7 +228,7 @@ export class AccordAIAssistant {
       }
     }
 
-    // 4. Synthesize the answer (Deterministic Grounded Engine first, plus optional Gemini synthesis if key is configured)
+    // 4. Synthesize the answer (Natural-Language Grounded Engine first, plus optional Gemini synthesis if key is configured)
     let answer = this.buildDeterministicAnswer({
       rawQuestion,
       questionLower,
@@ -252,9 +279,8 @@ export class AccordAIAssistant {
   }
 
   /**
-   * Comprehensive, zero-API-key deterministic query resolver that answers natural-language
-   * questions about the trade, participants, safety, verification, conditions, Walrus memory,
-   * expiration, refunds, disputes, and next steps.
+   * Natural-language grounded query resolver that answers specific user questions directly
+   * in conversational prose without needing an external LLM API key.
    */
   private buildDeterministicAnswer(params: {
     rawQuestion: string;
@@ -276,7 +302,6 @@ export class AccordAIAssistant {
       targetNetwork,
       netName,
       verifiedFacts,
-      userClaims,
       outstandingActions,
       citedMemories,
     } = params;
@@ -292,39 +317,100 @@ export class AccordAIAssistant {
       ? "Seller"
       : isArbiter
       ? "Neutral Arbiter"
-      : "Observer";
+      : "Participant";
 
-    // 1. Greeting / Help / Capabilities ("hi", "hello", "what can you do", "help", "who are you")
+    // 1. Trade Room Age / Duration / When Created ("how long", "when was", "opened", "started", "created", "old", "age", "since when")
     if (
-      /^(hi|hello|hey|help|yo|greetings|what can you do|who are you|how does this work)\b/i.test(
-        rawQuestion
-      )
+      questionLower.includes("how long") ||
+      questionLower.includes("when was") ||
+      questionLower.includes("when did") ||
+      questionLower.includes("created") ||
+      questionLower.includes("opened") ||
+      questionLower.includes("started") ||
+      questionLower.includes("how old") ||
+      questionLower.includes("since when") ||
+      questionLower.includes("duration")
     ) {
       if (trade) {
-        return `I am the Accord Context & Memory Assistant for Trade ${trade.reference} (${trade.amount} ${trade.asset} on ${netName}, currently "${trade.status}"). I operate without needing an external LLM API key by directly querying the server-side agreement ledger, live Tatum RPC blockchain receipts, and Walrus Memory records. You can ask me: (1) what the agreed terms or version hashes are, (2) whether the deposit is verified on-chain, (3) whether it is safe for the Seller to deliver, (4) who the Buyer/Seller/Arbiter are, (5) when the trade expires, or (6) what needs to happen next.`;
+        const createdMs = trade.createdAt ? new Date(trade.createdAt).getTime() : Date.now();
+        const elapsedStr = formatDurationHuman(Date.now() - createdMs);
+        const createdTimeStr = trade.createdAt
+          ? new Date(trade.createdAt).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            })
+          : "recently";
+        const remMs = (trade.expirationTimestamp || Date.now() + 86400000) - Date.now();
+        const remStr = remMs > 0 ? formatDurationHuman(remMs) : "0 minutes (expired)";
+        const eventCount = Array.isArray(trade.activity) ? trade.activity.length : 1;
+
+        return `Trade room ${trade.reference} has been open for ${elapsedStr} (initialized at ${createdTimeStr}). Since opening, ${eventCount} chronological audit event${eventCount === 1 ? " has" : "s have"} been recorded, and the agreement remains valid for another ${remStr} before its expiration deadline.`;
       }
-      return `I am the Accord Context & Memory Assistant. I answer questions using live Tatum RPC blockchain verification and persistent Walrus Memory records, strictly separating on-chain facts from off-chain participant claims.`;
+      return "This trade room was initialized in the current session and remains active until its configured settlement expiration window elapses.";
     }
 
-    // 2. Safety to deliver / trust check ("safe", "deliver", "should i send", "trust", "scam", "risk")
+    // 2. Greeting / Help / Capabilities ("hi", "hello", "what can you do", "help", "who are you")
+    if (
+      /^(hi|hello|hey|help|yo|greetings|what can you do|who are you)\b/i.test(rawQuestion)
+    ) {
+      if (trade) {
+        return `Hello! I am the Accord Context & Memory Assistant for Trade ${trade.reference} (${trade.amount} ${trade.asset} on ${netName}, currently in "${trade.status}" status). You can ask me anything about this trade—such as how long the room has been open, whether the deposit is verified on-chain, whether it is safe to deliver, who the Buyer/Seller/Arbiter are, why an action is locked, or what needs to happen next.`;
+      }
+      return `Hello! I am the Accord Context & Memory Assistant. I answer questions using live Tatum RPC blockchain verification and persistent Walrus Memory records.`;
+    }
+
+    // 3. "Why" Questions ("why is", "why can't", "why cant", "why isn't", "why not", "why")
+    if (
+      questionLower.startsWith("why") ||
+      questionLower.includes("why can't") ||
+      questionLower.includes("why cant") ||
+      questionLower.includes("why is") ||
+      questionLower.includes("why isn't")
+    ) {
+      if (trade) {
+        const pendingConds = (trade.conditions || []).filter((c: any) => !c.completed);
+        if (trade.status === "AwaitingAcceptance") {
+          const whoMustAccept = !trade.sellerAccepted
+            ? `Seller (${trade.seller.slice(0, 8)}...)`
+            : `Buyer (${trade.buyer.slice(0, 8)}...)`;
+          return `The trade is currently in "AwaitingAcceptance" because ${whoMustAccept} has not yet signed Version ${trade.termsVersions?.length || 1} of the agreed terms. Once signed in Section I, the room advances to "AwaitingDeposit".`;
+        }
+        if (trade.status === "AwaitingDeposit" || !onchainVerification?.verified) {
+          return `The trade is in "${trade.status}" status and settlement actions are locked because Tatum RPC has not yet verified a confirmed on-chain deposit receipt (status 0x1) for ${trade.amount} ${trade.asset} on ${netName}. Accord never allows a frontend button alone to mark a trade as funded without a real blockchain receipt in Section II.`;
+        }
+        if (pendingConds.length > 0) {
+          return `Final fund release is not yet unlocked because ${pendingConds.length} settlement condition${pendingConds.length === 1 ? " is" : "s are"} still incomplete in Section III: ${pendingConds.map((c: any) => `"${c.title}"`).join(", ")}. Complete and attest all conditions to unlock release.`;
+        }
+        if (!isBuyer && (questionLower.includes("release") || questionLower.includes("approve"))) {
+          return `You are currently viewing the room as ${activeRoleLabel}. Under Accord's authorization rules, only the Buyer (${trade.buyer.slice(0, 8)}...) can unilaterally release principal to the Seller once conditions are met. Switch "View as: Buyer" at the top of the room to test releasing funds.`;
+        }
+        return `Trade ${trade.reference} is currently in "${trade.status}" status. ${outstandingActions[0] || "All conditions are satisfied and ready for Buyer release."}`;
+      }
+    }
+
+    // 4. Safety to deliver / trust check ("safe", "deliver", "should i send", "trust", "scam", "risk", "legit")
     if (
       questionLower.includes("safe") ||
       questionLower.includes("should i deliver") ||
       questionLower.includes("should i send") ||
       questionLower.includes("can i deliver") ||
       questionLower.includes("trust") ||
+      questionLower.includes("scam") ||
+      questionLower.includes("legit") ||
       questionLower.includes("risk")
     ) {
       if (onchainVerification?.verified && onchainVerification.status === "confirmed") {
-        return `Yes — Verified On-Chain via Tatum RPC: The Buyer's deposit of ${onchainVerification.valueEth || trade?.amount} ${trade?.asset || "ETH"} is confirmed on ${netName} in Block #${onchainVerification.blockNumber} (${onchainVerification.confirmations} confirmations, receipt status 0x1). The Seller can now proceed with the agreed delivery and record the SHA-256 attestation in Section III.`;
+        return `Yes — Verified On-Chain via Tatum RPC: The Buyer's deposit of ${onchainVerification.valueEth || trade?.amount} ${trade?.asset || "ETH"} is confirmed on ${netName} in Block #${onchainVerification.blockNumber} (${onchainVerification.confirmations} confirmations, receipt status 0x1). The Seller can safely proceed with delivery and record the SHA-256 attestation in Section III.`;
       }
-      return `Do NOT deliver off-chain assets yet — Tatum RPC has not confirmed an on-chain deposit receipt for ${trade?.reference || "this trade"} (current status: "${trade?.status || "Unfunded"}"). Wait until Section II shows a verified Tatum RPC receipt with status 0x1 and block confirmations before delivering any keys, domains, or goods.`;
+      return `No, do NOT deliver off-chain assets yet — Tatum RPC has not confirmed an on-chain deposit receipt for ${trade?.reference || "this trade"} (current status: "${trade?.status || "Unfunded"}"). Wait until Section II confirms a verified Tatum RPC receipt with status 0x1 before delivering any keys, domains, or goods.`;
     }
 
-    // 3. Participants / Addresses / Roles ("who is", "buyer", "seller", "arbiter", "participants", "my role", "address")
+    // 5. Participants / Addresses / Roles ("who is", "who are", "participants", "buyer", "seller", "arbiter", "my role", "address", "who am i")
     if (
       questionLower.includes("who is") ||
       questionLower.includes("who are") ||
+      questionLower.includes("who am i") ||
       questionLower.includes("participants") ||
       questionLower.includes("buyer") ||
       questionLower.includes("seller") ||
@@ -333,30 +419,31 @@ export class AccordAIAssistant {
       questionLower.includes("addresses")
     ) {
       if (trade) {
-        return `Participants for Trade ${trade.reference}:
+        return `For Trade ${trade.reference}, the three appointed addresses are:
 • Buyer: ${trade.buyer} (${trade.buyerAccepted ? "Signed Terms" : "Signature Pending"})
 • Seller: ${trade.seller} (${trade.sellerAccepted ? "Signed Terms" : "Signature Pending"})
 • Neutral Arbiter: ${trade.arbiter} (Independent third party for dispute rulings)
-• Your current perspective: ${activeRoleLabel}${activeUser ? ` (${activeUser.slice(0, 10)}...)` : ""}.`;
+You are currently viewing the room as the ${activeRoleLabel}.`;
       }
     }
 
-    // 4. Agreed Terms / Version History / Amendments ("agreed", "terms", "version", "amend", "changed", "contract")
+    // 6. Agreed Terms / Version History / Amendments ("agreed", "terms", "version", "amend", "changed", "contract", "clause")
     if (
       questionLower.includes("agreed") ||
       questionLower.includes("terms") ||
       questionLower.includes("version") ||
       questionLower.includes("amend") ||
-      questionLower.includes("agreement")
+      questionLower.includes("agreement") ||
+      questionLower.includes("clause")
     ) {
       if (trade) {
         const verCount = trade.termsVersions?.length || 1;
-        return `Both parties are bound to Version ${verCount} of Trade ${trade.reference} (${trade.amount} ${trade.asset} on ${netName}). Agreed terms: "${trade.agreedTerms}". Buyer accepted: ${trade.buyerAccepted ? "Yes" : "Pending"}; Seller accepted: ${trade.sellerAccepted ? "Yes" : "Pending"}. Terms SHA-256 hash: ${trade.termsHash?.slice(0, 18)}... (any edit creates Version ${verCount + 1} and resets counterparty acceptance so terms can never be silently overwritten).`;
+        return `Both parties are bound to Version ${verCount} of Trade ${trade.reference} (${trade.amount} ${trade.asset} on ${netName}). The agreed terms state: "${trade.agreedTerms}". Buyer accepted: ${trade.buyerAccepted ? "Yes" : "Pending"}; Seller accepted: ${trade.sellerAccepted ? "Yes" : "Pending"}. Every term version is hashed (${trade.termsHash?.slice(0, 14)}...) so edits are always visible and never silently overwrite prior acceptance.`;
       }
       return "Retrieved persistent agreement records from Walrus Memory show that trade terms are versioned and cryptographically hashed before deposit.";
     }
 
-    // 5. Deposit / Confirmation / Tx Hash / Block ("deposit", "confirmed", "funded", "paid", "tx", "transaction", "hash", "block")
+    // 7. Deposit / Confirmation / Tx Hash / Block ("deposit", "confirmed", "funded", "paid", "tx", "transaction", "hash", "block", "verify")
     if (
       questionLower.includes("deposit") ||
       questionLower.includes("confirmed") ||
@@ -369,56 +456,78 @@ export class AccordAIAssistant {
       questionLower.includes("verify")
     ) {
       if (onchainVerification?.verified) {
-        return `Yes — Verified On-Chain via Tatum RPC: Deposit transaction ${onchainVerification.txHash} is confirmed on ${netName} in Block #${onchainVerification.blockNumber} with ${onchainVerification.confirmations} block confirmations and status 0x1 (${onchainVerification.valueEth || trade?.amount} ${trade?.asset || "ETH"} from ${onchainVerification.from?.slice(0, 10)}... to ${onchainVerification.to?.slice(0, 10)}...).`;
+        return `Yes — Verified On-Chain via Tatum RPC: Deposit transaction ${onchainVerification.txHash.slice(0, 14)}... is confirmed on ${netName} in Block #${onchainVerification.blockNumber} with ${onchainVerification.confirmations} block confirmations and status 0x1 (${onchainVerification.valueEth || trade?.amount} ${trade?.asset || "ETH"}).`;
       } else if (onchainVerification?.status === "pending") {
-        return `Not yet — Tatum RPC reports transaction ${onchainVerification.txHash} is currently pending in the ${netName} mempool with 0 confirmations. Wait for block inclusion before fulfilling off-chain deliverables.`;
+        return `Not yet — Tatum RPC reports transaction ${onchainVerification.txHash.slice(0, 14)}... is still pending in the ${netName} mempool with 0 confirmations. Do not release off-chain deliverables until block confirmation.`;
       } else {
         const sampleHint = trade?.sampleVerifiableTxHash
-          ? ` For this showcase trade, you can click "Load Real Base Mainnet Tx" in Section II (${trade.sampleVerifiableTxHash.slice(0, 14)}...) and click "Verify via Tatum RPC" to verify the live Base Mainnet receipt.`
+          ? ` In Section II, you can click "Load Real Base Mainnet Tx" and then "Verify via Tatum RPC" to verify the live Base Mainnet transaction (${trade.sampleVerifiableTxHash.slice(0, 12)}...).`
           : "";
-        return `No — Tatum RPC has not verified a confirmed deposit transaction for ${trade?.reference || "this trade"} yet (current status: "${trade?.status || "AwaitingDeposit"}"). Accord never allows a frontend button alone to mark a trade as funded without a verified blockchain receipt.${sampleHint}`;
+        return `No — Tatum RPC has not verified a confirmed deposit transaction for this trade yet (current status: "${trade?.status || "AwaitingDeposit"}"). Accord never allows a frontend button alone to mark a trade as funded without a verified blockchain receipt.${sampleHint}`;
       }
     }
 
-    // 6. Expiration / Deadline / Refund ("expire", "expiration", "deadline", "time left", "when does", "refund")
+    // 8. Expiration / Deadline / Refund ("expire", "expiration", "deadline", "time left", "refund", "cancel")
     if (
       questionLower.includes("expire") ||
       questionLower.includes("expiration") ||
       questionLower.includes("deadline") ||
-      questionLower.includes("time") ||
-      questionLower.includes("refund")
+      questionLower.includes("time left") ||
+      questionLower.includes("refund") ||
+      questionLower.includes("cancel")
     ) {
       if (trade) {
         const msLeft = (trade.expirationTimestamp || 0) - Date.now();
-        const hoursLeft = Math.max(0, Math.round(msLeft / (1000 * 60 * 60)));
+        const remStr = msLeft > 0 ? formatDurationHuman(msLeft) : "Expired";
         const expDate = trade.expirationTimestamp
           ? new Date(trade.expirationTimestamp).toUTCString()
           : "Unspecified";
-        return `Trade ${trade.reference} expires on ${expDate} (${hoursLeft > 0 ? `~${hoursLeft} hours remaining` : "Expiration window elapsed"}). Refund rules: (1) The Seller (${trade.seller.slice(0, 8)}...) can authorize a full refund to the Buyer at any time while Funded; (2) The Neutral Arbiter (${trade.arbiter.slice(0, 8)}...) can order a full or partial refund during a Dispute; (3) Once the expiration timestamp passes without completion or active dispute, the Buyer can claim an expired refund.`;
+        return `Trade ${trade.reference} expires on ${expDate} (${msLeft > 0 ? `${remStr} remaining` : "Expiration window has elapsed"}). Refund rules: (1) The Seller (${trade.seller.slice(0, 8)}...) can authorize a full refund to the Buyer at any time while Funded; (2) The Neutral Arbiter (${trade.arbiter.slice(0, 8)}...) can order a full or partial refund during a Dispute; (3) Once expired without completion, the Buyer can claim an expired refund.`;
       }
     }
 
-    // 7. Amount / Asset / Network / Escrow ("how much", "amount", "asset", "token", "network", "chain", "escrow", "fee")
+    // 9. Amount / Asset / Price / Network / Escrow ("how much", "amount", "price", "value", "asset", "token", "network", "chain", "escrow", "fee")
     if (
       questionLower.includes("how much") ||
       questionLower.includes("amount") ||
+      questionLower.includes("price") ||
+      questionLower.includes("value") ||
       questionLower.includes("asset") ||
       questionLower.includes("token") ||
       questionLower.includes("network") ||
       questionLower.includes("chain") ||
       questionLower.includes("escrow") ||
+      questionLower.includes("fee") ||
       questionLower.includes("mode")
     ) {
       if (trade) {
         const modeDesc =
           trade.settlementMode === "escrow" && trade.escrowAddress
             ? `On-Chain Smart Contract Escrow (${trade.escrowAddress})`
-            : `Direct Peer-to-Peer Settlement verified via Tatum RPC (Buyer transfers directly to Seller ${trade.seller.slice(0, 10)}...)`;
-        return `Trade ${trade.reference} specifies a principal of ${trade.amount} ${trade.asset} on ${netName} (Chain ID ${SUPPORTED_NETWORKS[targetNetwork]?.chainId || 8453}). Settlement mode: ${modeDesc}.`;
+            : `Direct Verified Settlement via Tatum RPC (Buyer transfers ${trade.amount} ${trade.asset} to Seller ${trade.seller.slice(0, 10)}... with 0% protocol fee)`;
+        return `Trade ${trade.reference} is for ${trade.amount} ${trade.asset} on ${netName} (Chain ID ${SUPPORTED_NETWORKS[targetNetwork]?.chainId || 8453}). Settlement mode: ${modeDesc}.`;
       }
     }
 
-    // 8. Conditions / Next Steps / Release ("condition", "outstanding", "remaining", "next", "what should i do", "release", "settle", "complete")
+    // 10. "How" Questions ("how do i", "how can i", "how to", "how does")
+    if (
+      questionLower.startsWith("how") ||
+      questionLower.includes("how do i") ||
+      questionLower.includes("how can i") ||
+      questionLower.includes("how to")
+    ) {
+      if (trade) {
+        if (trade.status === "AwaitingAcceptance") {
+          return `To move forward from "AwaitingAcceptance": Select "View as: Seller" (or the non-creator party) in the top-right bar, review the written agreement in Section I, and click "Accept & Sign Terms". If you want to propose changes first, click "Amend Terms" to create Version ${(trade.termsVersions?.length || 1) + 1}.`;
+        }
+        if (trade.status === "AwaitingDeposit") {
+          return `To fund and verify this trade in Section II: The Buyer transfers ${trade.amount} ${trade.asset} on ${netName}, pastes the 66-character 0x transaction hash into Section II (or clicks "Load Real Base Mainnet Tx" for showcase trade ${trade.reference}), and clicks "Verify via Tatum RPC".`;
+        }
+        return `To complete settlement from "${trade.status}": First ensure each condition in Section III is attested (anchoring its SHA-256 receipt to Walrus Memory). Once all ${(trade.conditions || []).length} conditions show "Fulfilled", the Buyer clicks "Approve & Release Funds to Seller" in Section III.`;
+      }
+    }
+
+    // 11. Conditions / Next Steps / Release ("condition", "outstanding", "remaining", "next", "what should", "release", "settle", "complete", "status")
     if (
       questionLower.includes("condition") ||
       questionLower.includes("outstanding") ||
@@ -435,13 +544,16 @@ export class AccordAIAssistant {
         const totalConds = trade.conditions?.length || 0;
         const doneConds = (trade.conditions || []).filter((c: any) => c.completed).length;
         if (outstandingActions.length > 0) {
-          return `Current status is "${trade.status}" (${doneConds}/${totalConds} conditions satisfied). Viewing as ${activeRoleLabel}, the remaining steps before final settlement are: ${outstandingActions.join(" ")}`;
+          return `Remaining steps before settlement (${doneConds}/${totalConds} conditions satisfied): ${outstandingActions.join(" ")}`;
         }
-        return `All ${totalConds}/${totalConds} settlement conditions are satisfied and the deposit is verified. The Buyer (${trade.buyer.slice(0, 8)}...) can now click "Approve & Release Funds to Seller" in Section III to complete settlement.`;
+        return `All ${totalConds}/${totalConds} listed settlement conditions have been satisfied. If the trade is in ReadyForRelease status, the Buyer (${trade.buyer.slice(0, 8)}...) can now authorize final settlement release in Section III.`;
+      }
+      if (outstandingActions.length > 0) {
+        return `Remaining steps before settlement: ${outstandingActions.join(" ")}`;
       }
     }
 
-    // 9. Counterparty History / Walrus Memory ("previous", "past", "history", "counterparty", "preference", "walrus", "memory", "recall")
+    // 12. Counterparty History / Walrus Memory ("previous", "past", "history", "counterparty", "preference", "walrus", "memory", "recall", "happened")
     if (
       questionLower.includes("previous") ||
       questionLower.includes("past") ||
@@ -450,7 +562,8 @@ export class AccordAIAssistant {
       questionLower.includes("preference") ||
       questionLower.includes("walrus") ||
       questionLower.includes("memory") ||
-      questionLower.includes("recall")
+      questionLower.includes("recall") ||
+      questionLower.includes("happened")
     ) {
       const relevantMems = citedMemories.filter(
         (m) =>
@@ -461,15 +574,15 @@ export class AccordAIAssistant {
           m.type === "ONCHAIN_VERIFICATION"
       );
       if (relevantMems.length > 0) {
-        return `By retrieving persistent trade context from Walrus Memory (without retraining or modifying model weights), Accord recalled ${relevantMems.length} relevant record(s): ${relevantMems
-          .slice(0, 3)
-          .map((m) => `[${m.type}] ${m.content}`)
+        return `By retrieving persistent trade context from Walrus Memory (without retraining or modifying model weights), Accord found ${relevantMems.length} historical record(s): ${relevantMems
+          .slice(0, 2)
+          .map((m) => m.content)
           .join(" | ")}`;
       }
-      return "Accord queried persistent Walrus Memory and found no prior disputes or adverse records for this counterparty address.";
+      return "Accord queried persistent Walrus Memory and found no prior disputes or historical records for this counterparty address.";
     }
 
-    // 10. Disputes / Evidence ("dispute", "evidence", "problem", "wrong", "cheat", "ruling", "split")
+    // 13. Disputes / Evidence ("dispute", "evidence", "problem", "wrong", "ruling", "split")
     if (
       questionLower.includes("dispute") ||
       questionLower.includes("evidence") ||
@@ -477,31 +590,24 @@ export class AccordAIAssistant {
       questionLower.includes("split") ||
       questionLower.includes("problem")
     ) {
-      const activeDisputes = trade?.disputeEvidence?.length || 0;
-      return `Because blockchains cannot independently prove off-chain promises or physical delivery, Accord separates Tatum RPC on-chain receipts from off-chain participant claims. ${
-        activeDisputes > 0
-          ? `There ${activeDisputes === 1 ? "is 1 active dispute claim" : `are ${activeDisputes} active dispute claims`} logged on this trade. `
-          : ""
-      }To resolve a dispute in Section III: (1) Either party submits delivery logs or checksums to the Evidence Vault (anchored via SHA-256 to Walrus Memory); (2) Both parties can execute a 50/50 Mutual Settlement, OR the appointed Neutral Arbiter (${trade?.arbiter?.slice(0, 10) || "Arbiter"}...) can issue a binding basis-point split ruling. AI never decides disputes or moves funds.`;
+      return "Because blockchains cannot independently verify off-chain promises or physical delivery, Accord distinguishes on-chain receipts (verified by Tatum RPC) from off-chain claims. To resolve a dispute, participants submit delivery receipts, logs, or communications in the Evidence Vault; Accord computes a SHA-256 hash and anchors the reference to Walrus Memory so the appointed Neutral Arbiter (or both parties via mutual settlement) can inspect and execute resolution on-chain. AI models never authorize releases or decide disputes.";
     }
 
-    // 11. General / Open-Ended Question Synthesis: match any terms in the question against the trade & activity log
+    // 14. Conversational synthesis for any other custom question
     if (trade) {
+      const createdMs = trade.createdAt ? new Date(trade.createdAt).getTime() : Date.now();
+      const elapsedStr = formatDurationHuman(Date.now() - createdMs);
       const doneConds = (trade.conditions || []).filter((c: any) => c.completed).length;
       const totalConds = (trade.conditions || []).length;
-      const latestActivity =
-        trade.activity && trade.activity.length > 0
-          ? trade.activity[trade.activity.length - 1]
-          : null;
 
-      return `For your question ("${rawQuestion}") on Trade ${trade.reference} (${trade.amount} ${trade.asset} on ${netName}):
-• Current Status: ${trade.status} (${doneConds}/${totalConds} conditions satisfied; Deposit verified on-chain: ${onchainVerification?.verified ? `Yes, Block #${onchainVerification.blockNumber}` : "Not yet"}).
-• Agreed Terms (v${trade.termsVersions?.length || 1}): "${trade.agreedTerms}"
-• Latest Recorded Event: ${latestActivity ? `${latestActivity.title} — ${latestActivity.description}` : "Trade initialized."}
-• Next Required Action: ${outstandingActions[0] || "All conditions met; Buyer may authorize release."}`;
+      return `Trade ${trade.reference} (${trade.amount} ${trade.asset} on ${netName}) has been active for ${elapsedStr} and is currently in "${trade.status}" status with ${doneConds} of ${totalConds} conditions satisfied. ${
+        onchainVerification?.verified
+          ? `The deposit is verified on-chain via Tatum RPC in Block #${onchainVerification.blockNumber}.`
+          : `No on-chain deposit receipt has been verified via Tatum RPC yet.`
+      } Next step: ${outstandingActions[0] || "Buyer can now authorize final release to the Seller."}`;
     }
 
-    return `Accord Context Summary: ${verifiedFacts[0] || "Select a trade room to inspect live Tatum RPC receipts and Walrus Memory records."} ${outstandingActions[0] || ""}`;
+    return `Accord Context Summary: ${verifiedFacts[0] || "Open a trade room to inspect live Tatum RPC receipts and Walrus Memory records."} ${outstandingActions[0] || ""}`;
   }
 
   /**
@@ -523,13 +629,32 @@ export class AccordAIAssistant {
       const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
       const prompt = `You are the Accord Context & Memory Assistant inside a peer-to-peer crypto settlement room.
-Answer the user's question concisely (2-4 sentences) using ONLY the grounded data below.
+Answer the user's question directly and concisely (2-4 sentences) using ONLY the grounded data below.
 Rules:
 1. Explicitly distinguish Verified On-Chain Facts (via Tatum RPC) from Off-Chain Participant Claims/Attestations.
 2. Never claim to retrain weights or modify parameters; context comes from Walrus Memory recall and Tatum RPC.
 3. Never claim you can release funds or decide disputes yourself.
 
 User Question: ${params.question}
+
+Trade Metadata:
+${
+  params.currentTrade
+    ? JSON.stringify({
+        reference: params.currentTrade.reference,
+        status: params.currentTrade.status,
+        amount: params.currentTrade.amount,
+        asset: params.currentTrade.asset,
+        network: params.currentTrade.network,
+        buyer: params.currentTrade.buyer,
+        seller: params.currentTrade.seller,
+        arbiter: params.currentTrade.arbiter,
+        createdAt: params.currentTrade.createdAt,
+        expirationTimestamp: params.currentTrade.expirationTimestamp,
+        agreedTerms: params.currentTrade.agreedTerms,
+      })
+    : "None"
+}
 
 Verified Facts:
 ${params.verifiedFacts.join("\n")}
