@@ -1,12 +1,10 @@
-import { http, createConfig, injected } from "wagmi";
+import { http, createConfig } from "wagmi";
 import { base, baseSepolia, mainnet, polygon } from "wagmi/chains";
 
 export const wagmiConfig = createConfig({
   chains: [base, baseSepolia, mainnet, polygon],
   multiInjectedProviderDiscovery: false,
-  connectors: [
-    injected({ shimDisconnect: true }),
-  ],
+  connectors: [],
   transports: {
     [base.id]: http("https://base-mainnet.gateway.tatum.io"),
     [baseSepolia.id]: http("https://base-sepolia.gateway.tatum.io"),

@@ -8,6 +8,7 @@ import {
   useDisconnect,
   useChainId,
   useSwitchChain,
+  injected,
   type Connector,
 } from "wagmi";
 import { Check, Copy, ChevronDown, X, ArrowUpRight, AlertCircle } from "lucide-react";
@@ -22,6 +23,14 @@ interface SuggestedWalletOption {
 }
 
 const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
+  {
+    id: "zerion",
+    name: "Zerion Wallet",
+    subtitle: "Multi-chain DeFi & EVM browser extension",
+    installUrl: "https://zerion.io/wallet",
+    matchTargets: ["zerion", "io.zerion.wallet"],
+    detectFlag: (eth) => Boolean(eth?.isZerion),
+  },
   {
     id: "metaMask",
     name: "MetaMask",
@@ -200,17 +209,7 @@ export function WalletStatusPill() {
         return;
       }
 
-      const targetConnector = findConnectorForWallet(wallet);
-      if (!targetConnector) {
-        setErrorNotice({
-          walletName: wallet.name,
-          message: `No compatible connector available for ${wallet.name}.`,
-          installUrl: wallet.installUrl,
-        });
-        setConnectingId(null);
-        return;
-      }
-
+      const targetConnector = findConnectorForWallet(wallet) ?? injected({ shimDisconnect: true });
       await connectAsync({ connector: targetConnector });
       setModalOpen(false);
     } catch (err: any) {
