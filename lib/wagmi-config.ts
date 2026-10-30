@@ -3,14 +3,9 @@ import { base, baseSepolia, mainnet, polygon } from "wagmi/chains";
 
 export const wagmiConfig = createConfig({
   chains: [base, baseSepolia, mainnet, polygon],
-  multiInjectedProviderDiscovery: true,
+  multiInjectedProviderDiscovery: false,
   connectors: [
-    injected({ target: "metaMask" }),
-    injected({ target: "rabby" }),
-    injected({ target: "coinbaseWallet" }),
-    injected({ target: "phantom" }),
-    injected({ target: "braveWallet" }),
-    injected(),
+    injected({ shimDisconnect: true }),
   ],
   transports: {
     [base.id]: http("https://base-mainnet.gateway.tatum.io"),

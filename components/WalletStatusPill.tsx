@@ -102,10 +102,13 @@ export function WalletStatusPill() {
 
   useEffect(() => {
     setMounted(true);
-    if (typeof window !== "undefined") {
+  }, []);
+
+  useEffect(() => {
+    if (modalOpen && typeof window !== "undefined") {
       setHasWindowEthereum(Boolean((window as any).ethereum));
     }
-  }, []);
+  }, [modalOpen]);
 
   // Close popovers on outside click or Escape
   useEffect(() => {

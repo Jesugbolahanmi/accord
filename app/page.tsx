@@ -79,14 +79,25 @@ export default async function HomePage() {
 
               <div>
                 <dt className="text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
-                  Memory Layer
+                  Memory Box Layer
                 </dt>
                 <dd className="mt-1 text-[13px] font-mono-tabular text-[#F4F2ED]">
-                  Walrus Mainnet
+                  {relayerHealth.mainnetWritesEnabled
+                    ? "Walrus Mainnet Active"
+                    : "Accord Memory Box"}
                 </dd>
-                <dd className="text-[11px] text-[#6E6C65] mt-0.5">
-                  Relayer{" "}
-                  {relayerHealth.status === "ok" ? "online (200 OK)" : "configured"}
+                <dd
+                  className={`text-[11px] mt-0.5 ${
+                    relayerHealth.mainnetWritesEnabled
+                      ? "text-[#5CE0A8]"
+                      : "text-[#C5A46D]"
+                  }`}
+                >
+                  {relayerHealth.mainnetWritesEnabled
+                    ? `Mainnet Writes Ready (${relayerHealth.writesConfirmedCount} confirmed)`
+                    : relayerHealth.relayerReachable
+                    ? "Relayer Reachable · Dev Mock Active (No Keys)"
+                    : "Relayer Unreachable · Local Pending Queue"}
                 </dd>
               </div>
 

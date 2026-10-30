@@ -17,6 +17,9 @@
  */
 
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { walrusMemory } from "../walrus/memory";
 import { VerificationResult } from "../tatum/client";
 import { getEscrowAddress } from "../contracts/AccordEscrow";
@@ -45,6 +48,7 @@ export interface SettlementCondition {
   txHash?: string;
   attestationNote?: string;
   evidenceHash?: string;
+  walrusMemoryId?: string;
 }
 
 export interface TermsVersion {
@@ -54,6 +58,9 @@ export interface TermsVersion {
   proposedBy: string;
   changeSummary?: string;
   timestamp: string;
+  acceptedByBuyer?: boolean;
+  acceptedBySeller?: boolean;
+  acceptedAt?: string;
 }
 
 export interface TradeActivity {
@@ -62,6 +69,7 @@ export interface TradeActivity {
     | "TRADE_CREATED"
     | "TERMS_UPDATED"
     | "TERMS_ACCEPTED"
+    | "PAYMENT_SUBMITTED"
     | "DEPOSIT_VERIFIED"
     | "CONDITION_COMPLETED"
     | "SELLER_FULFILLED"
@@ -112,8 +120,11 @@ export interface Trade {
   termsVersions: TermsVersion[];
   buyerAccepted: boolean;
   sellerAccepted: boolean;
+  buyerAcceptedAt?: string;
+  sellerAcceptedAt?: string;
   sellerFulfilled: boolean;
   conditions: SettlementCondition[];
+  submittedTxHash?: string;
   txHash?: string;
   sampleVerifiableTxHash?: string;
   verification?: VerificationResult;
@@ -136,14 +147,68 @@ export interface Trade {
 }
 
 const TRADE_STORE: Map<string, Trade> = new Map();
+let tradesHydrated = false;
+
+function getTradesFilePath(): string {
+  if (process.env.ACCORD_TEST_MODE === "1") {
+    return path.join(os.tmpdir(), `accord-test-trades-${process.pid}.json`);
+  }
+  const localDir = path.join(process.cwd(), ".accord-data");
+  try {
+    if (!fs.existsSync(localDir)) {
+      fs.mkdirSync(localDir, { recursive: true });
+    }
+    return path.join(localDir, "trades.json");
+  } catch {
+    return path.join(os.tmpdir(), "accord-trades.json");
+  }
+}
+
+function hydrateTradesFromDisk(): void {
+  if (tradesHydrated) return;
+  tradesHydrated = true;
+  try {
+    const file = getTradesFilePath();
+    if (fs.existsSync(file)) {
+      const raw = fs.readFileSync(file, "utf8");
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const t of parsed) {
+          if (t && t.id && t.reference) {
+            TRADE_STORE.set(t.id, t);
+            TRADE_STORE.set(t.reference, t);
+          }
+        }
+      }
+    }
+  } catch {
+    // Continue with in-memory store
+  }
+}
+
+function persistTradesToDisk(): void {
+  try {
+    const file = getTradesFilePath();
+    const unique = Array.from(
+      new Map(Array.from(TRADE_STORE.values()).map((t) => [t.id, t])).values()
+    );
+    fs.writeFileSync(file, JSON.stringify(unique, null, 2), "utf8");
+  } catch {
+    // Ignore write failure in read-only environments
+  }
+}
 
 function computeTermsHash(terms: string): string {
   return `0x${crypto.createHash("sha256").update(terms).digest("hex")}`;
 }
 
 export class TradeService {
+  constructor() {
+    hydrateTradesFromDisk();
+  }
+
   /**
-   * Create a new Trade Agreement
+   * Create a new Trade Agreement and automatically record initial Trade History & Agreement memories
    */
   async createTrade(params: {
     id?: string;
@@ -252,10 +317,15 @@ export class TradeService {
           proposedBy: creatorClean,
           changeSummary: "Initial trade terms proposed",
           timestamp: nowIso,
+          acceptedByBuyer: buyerAccepted,
+          acceptedBySeller: sellerAccepted,
+          acceptedAt: nowIso,
         },
       ],
       buyerAccepted,
       sellerAccepted,
+      buyerAcceptedAt: buyerAccepted ? nowIso : undefined,
+      sellerAcceptedAt: sellerAccepted ? nowIso : undefined,
       sellerFulfilled: false,
       conditions,
       sampleVerifiableTxHash: params.sampleVerifiableTxHash,
@@ -272,10 +342,56 @@ export class TradeService {
     TRADE_STORE.set(reference, trade);
 
     try {
-      const memory = await walrusMemory.remember({
+      const createdMem = await walrusMemory.remember({
+        tradeId: id,
         tradeRef: reference,
+        title: `Trade Initialized — ${reference}`,
+        category: "Trade History",
+        type: "TRADE_CREATED",
+        actor: creatorClean,
+        sourceRole: params.creatorRole,
+        content: `Trade ${reference} initialized by ${params.creatorRole} (${creatorClean}) for ${params.amount} ${params.asset.toUpperCase()} on ${params.network}.`,
+        structuredPayload: {
+          tradeId: id,
+          reference,
+          amount: params.amount,
+          asset: params.asset.toUpperCase(),
+          network: params.network,
+          buyer: buyerClean,
+          seller: sellerClean,
+          arbiter: arbiterClean,
+        },
+        metadata: {
+          tradeId: id,
+          amount: params.amount,
+          asset: params.asset.toUpperCase(),
+          network: params.network,
+          participants: [buyerClean, sellerClean],
+        },
+      });
+
+      initialActivity.walrusMemoryId = createdMem.id;
+
+      const memory = await walrusMemory.remember({
+        tradeId: id,
+        tradeRef: reference,
+        title: `Original Agreement Version 1 Drafted — ${reference}`,
+        category: "Agreements",
         type: "TRADE_TERMS",
+        actor: creatorClean,
+        sourceRole: params.creatorRole,
         content: `Accord Trade Agreement Created (${reference}): ${params.amount} ${params.asset.toUpperCase()} on ${params.network}. Buyer: ${buyerClean}. Seller: ${sellerClean}. Terms (v1, hash ${termsHash.slice(0, 14)}...): ${params.agreedTerms}`,
+        structuredPayload: {
+          version: 1,
+          amount: params.amount,
+          asset: params.asset.toUpperCase(),
+          network: params.network,
+          buyer: buyerClean,
+          seller: sellerClean,
+          arbiter: arbiterClean,
+          termsHash,
+          conditionsCount: conditions.length,
+        },
         metadata: {
           tradeId: id,
           amount: params.amount,
@@ -291,10 +407,11 @@ export class TradeService {
         type: "WALRUS_MEMORY_SAVED",
         title: memory.verifiedOnWalrus
           ? "Terms Anchored to Walrus Memory Mainnet"
-          : "Terms Indexed in Accord Memory Queue",
+          : "Terms Preserved in Accord Memory Box",
         description: memory.verifiedOnWalrus
-          ? `Trade parameters anchored on Walrus Mainnet (Job: ${memory.jobId || memory.id}).`
-          : `Terms hash ${termsHash.slice(0, 14)}... indexed (Memory ID: ${memory.id}).`,
+          ? `Trade parameters anchored on Walrus Mainnet (Blob: ${memory.blobId || memory.jobId || memory.id}).`
+          : `Terms hash ${termsHash.slice(0, 14)}... preserved in Memory Box (Record ID: ${memory.id}).`,
+        actor: creatorClean,
         timestamp: new Date().toISOString(),
         walrusMemoryId: memory.id,
       });
@@ -302,6 +419,7 @@ export class TradeService {
       console.warn("[TradeStore] Walrus anchor notice:", err.message);
     }
 
+    persistTradesToDisk();
     return trade;
   }
 
@@ -309,7 +427,16 @@ export class TradeService {
    * Retrieve a trade by ID or Trade Reference (evaluating expiration dynamically)
    */
   getTrade(idOrRef: string): Trade | null {
-    const trade = TRADE_STORE.get(idOrRef) || null;
+    let trade = TRADE_STORE.get(idOrRef) || null;
+    if (!trade) {
+      const lower = (idOrRef || "").toLowerCase();
+      for (const item of TRADE_STORE.values()) {
+        if (item.id.toLowerCase() === lower || item.reference.toLowerCase() === lower) {
+          trade = item;
+          break;
+        }
+      }
+    }
     if (trade) {
       if (
         Date.now() > trade.expirationTimestamp &&
@@ -382,7 +509,8 @@ export class TradeService {
       throw new Error("Updated trade terms cannot be empty.");
     }
 
-    const nextVersion = trade.termsVersions.length + 1;
+    const previousVersion = trade.termsVersions.length;
+    const nextVersion = previousVersion + 1;
     const nowIso = new Date().toISOString();
     const newHash = computeTermsHash(newTerms.trim());
 
@@ -395,11 +523,16 @@ export class TradeService {
       proposedBy: actorLower,
       changeSummary: changeSummary || `Amended terms in Version ${nextVersion}`,
       timestamp: nowIso,
+      acceptedByBuyer: isBuyer,
+      acceptedBySeller: isSeller,
+      acceptedAt: nowIso,
     });
 
     // Reset counterparty acceptance so amendments are never silently accepted
     trade.buyerAccepted = isBuyer;
     trade.sellerAccepted = isSeller;
+    trade.buyerAcceptedAt = isBuyer ? nowIso : undefined;
+    trade.sellerAcceptedAt = isSeller ? nowIso : undefined;
     trade.status = "AwaitingAcceptance";
     trade.updatedAt = nowIso;
 
@@ -414,9 +547,22 @@ export class TradeService {
 
     try {
       const memory = await walrusMemory.remember({
+        tradeId: trade.id,
         tradeRef: trade.reference,
+        title: `Terms Amended to Version ${nextVersion} — ${trade.reference}`,
+        category: "Agreements",
         type: "TERMS_AMENDMENT",
+        actor: actorLower,
+        sourceRole: isBuyer ? "buyer" : "seller",
         content: `Terms for ${trade.reference} amended to Version ${nextVersion} by ${actorLower}. New terms hash: ${newHash}. Counterparty acceptance reset. Updated terms: "${newTerms.trim()}"`,
+        structuredPayload: {
+          previousVersion,
+          newVersion: nextVersion,
+          proposedBy: actorLower,
+          changeSummary: changeSummary || `Amended terms in Version ${nextVersion}`,
+          termsHash: newHash,
+          acceptanceReset: true,
+        },
         metadata: {
           version: nextVersion,
           proposedBy: actorLower,
@@ -427,8 +573,9 @@ export class TradeService {
       trade.activity.push({
         id: `act-${Date.now()}-wal-amend`,
         type: "WALRUS_MEMORY_SAVED",
-        title: "Amendment Anchored to Walrus Memory",
+        title: "Amendment Preserved in Memory Box",
         description: `Version ${nextVersion} diff and SHA-256 hash recorded (${memory.id}).`,
+        actor: actorLower,
         timestamp: new Date().toISOString(),
         walrusMemoryId: memory.id,
       });
@@ -436,6 +583,7 @@ export class TradeService {
       console.warn("[TradeStore] Walrus amendment notice:", err.message);
     }
 
+    persistTradesToDisk();
     return trade;
   }
 
@@ -454,15 +602,29 @@ export class TradeService {
       throw new Error("Only designated trade participants (Buyer or Seller) can accept terms.");
     }
 
-    if (isBuyer) trade.buyerAccepted = true;
-    if (isSeller) trade.sellerAccepted = true;
+    const nowIso = new Date().toISOString();
+    if (isBuyer) {
+      trade.buyerAccepted = true;
+      trade.buyerAcceptedAt = nowIso;
+    }
+    if (isSeller) {
+      trade.sellerAccepted = true;
+      trade.sellerAcceptedAt = nowIso;
+    }
+
+    const latestVersionObj = trade.termsVersions[trade.termsVersions.length - 1];
+    if (latestVersionObj) {
+      latestVersionObj.acceptedByBuyer = trade.buyerAccepted;
+      latestVersionObj.acceptedBySeller = trade.sellerAccepted;
+      latestVersionObj.acceptedAt = nowIso;
+    }
 
     if (trade.buyerAccepted && trade.sellerAccepted && trade.status === "AwaitingAcceptance") {
       trade.status = "AwaitingDeposit";
     }
 
-    trade.updatedAt = new Date().toISOString();
-    const currentVersion = trade.termsVersions[trade.termsVersions.length - 1]?.version || 1;
+    trade.updatedAt = nowIso;
+    const currentVersion = latestVersionObj?.version || 1;
 
     trade.activity.push({
       id: `act-${Date.now()}`,
@@ -475,9 +637,22 @@ export class TradeService {
 
     try {
       const memory = await walrusMemory.remember({
+        tradeId: trade.id,
         tradeRef: trade.reference,
+        title: `Version ${currentVersion} Accepted by ${isBuyer ? "Buyer" : "Seller"} — ${trade.reference}`,
+        category: "Agreements",
         type: "TRADE_ACCEPTANCE",
+        actor: pLower,
+        sourceRole: isBuyer ? "buyer" : "seller",
         content: `${isBuyer ? "Buyer" : "Seller"} ${pLower} formally accepted Version ${currentVersion} agreed terms (${trade.termsHash}) for ${trade.reference}. Trade status is now ${trade.status}.`,
+        structuredPayload: {
+          acceptedVersion: currentVersion,
+          acceptedBy: pLower,
+          role: isBuyer ? "buyer" : "seller",
+          termsHash: trade.termsHash,
+          bilateralComplete: Boolean(trade.buyerAccepted && trade.sellerAccepted),
+          tradeStatus: trade.status,
+        },
         metadata: {
           participant: pLower,
           version: currentVersion,
@@ -491,6 +666,7 @@ export class TradeService {
         type: "WALRUS_MEMORY_SAVED",
         title: "Acceptance Recorded in Walrus Memory",
         description: `Cryptographic acceptance record saved (${memory.id}).`,
+        actor: pLower,
         timestamp: new Date().toISOString(),
         walrusMemoryId: memory.id,
       });
@@ -498,6 +674,69 @@ export class TradeService {
       console.warn("[TradeStore] Walrus anchor error:", err.message);
     }
 
+    persistTradesToDisk();
+    return trade;
+  }
+
+  /**
+   * Record submission of a payment transaction reference before or during Tatum verification
+   */
+  async submitPaymentReference(
+    tradeId: string,
+    actor: string,
+    txHash: string
+  ): Promise<Trade> {
+    const trade = this.getTrade(tradeId);
+    if (!trade) throw new Error("Trade not found");
+
+    const cleanTx = txHash.trim();
+    const actorLower = (actor || trade.buyer).trim().toLowerCase();
+    const nowIso = new Date().toISOString();
+
+    trade.submittedTxHash = cleanTx;
+    trade.updatedAt = nowIso;
+
+    const alreadyLogged = trade.activity.some(
+      (a) => a.type === "PAYMENT_SUBMITTED" && a.txHash?.toLowerCase() === cleanTx.toLowerCase()
+    );
+
+    if (!alreadyLogged) {
+      const mem = await walrusMemory.remember({
+        tradeId: trade.id,
+        tradeRef: trade.reference,
+        title: `Payment Transaction Reference Submitted — ${trade.reference}`,
+        category: "Transactions",
+        type: "PAYMENT_SUBMITTED",
+        actor: actorLower,
+        sourceRole: actorLower === trade.buyer.toLowerCase() ? "buyer" : "participant",
+        content: `Payment transaction reference ${cleanTx} submitted for ${trade.reference} on ${trade.network} for Tatum RPC verification.`,
+        structuredPayload: {
+          submittedTxHash: cleanTx,
+          network: trade.network,
+          expectedAmount: trade.amount,
+          asset: trade.asset,
+          submittedBy: actorLower,
+        },
+        metadata: {
+          txHash: cleanTx,
+          network: trade.network,
+          participants: [trade.buyer, trade.seller],
+        },
+      });
+
+      trade.activity.push({
+        id: `act-${Date.now()}-paysub`,
+        type: "PAYMENT_SUBMITTED",
+        title: "Payment Transaction Reference Submitted",
+        description: `Transaction hash ${cleanTx.slice(0, 12)}... submitted for Tatum RPC verification on ${trade.network}.`,
+        actor: actorLower,
+        timestamp: nowIso,
+        txHash: cleanTx,
+        walrusMemoryId: mem.id,
+      });
+    }
+
+    persistTradesToDisk();
     return trade;
   }
 
@@ -509,12 +748,19 @@ export class TradeService {
     const trade = this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
+    if (!trade.buyerAccepted || !trade.sellerAccepted) {
+      throw new Error(
+        "Both Buyer and Seller must accept the current agreement version before a deposit can lock settlement."
+      );
+    }
+
     if (!verification.verified || verification.status !== "confirmed") {
       throw new Error(
         `Deposit verification failed: ${verification.errorMessage || "Transaction is not confirmed on-chain."}`
       );
     }
 
+    trade.submittedTxHash = verification.txHash;
     trade.txHash = verification.txHash;
     trade.verification = verification;
     trade.updatedAt = new Date().toISOString();
@@ -544,9 +790,25 @@ export class TradeService {
 
     try {
       const memory = await walrusMemory.remember({
+        tradeId: trade.id,
         tradeRef: trade.reference,
+        title: `Tatum RPC Verified Deposit (Block #${verification.blockNumber}) — ${trade.reference}`,
+        category: "Transactions",
         type: "ONCHAIN_VERIFICATION",
+        actor: "system:tatum-rpc",
+        sourceRole: "tatum_rpc",
         content: `Tatum RPC verified deposit for ${trade.reference}: Tx ${verification.txHash} confirmed on ${verification.network} (Block: ${verification.blockNumber}, Confirmations: ${verification.confirmations}, Value: ${verification.valueEth || trade.amount} ${trade.asset}).`,
+        structuredPayload: {
+          txHash: verification.txHash,
+          blockNumber: verification.blockNumber,
+          confirmations: verification.confirmations,
+          receiptStatus: "0x1",
+          valueEth: verification.valueEth || trade.amount,
+          asset: trade.asset,
+          network: verification.network,
+          from: verification.from,
+          to: verification.to,
+        },
         metadata: {
           txHash: verification.txHash,
           blockNumber: verification.blockNumber,
@@ -561,8 +823,9 @@ export class TradeService {
       trade.activity.push({
         id: `act-${Date.now()}-wal-dep`,
         type: "WALRUS_MEMORY_SAVED",
-        title: "Tatum RPC Proof Anchored to Walrus Memory",
+        title: "Tatum RPC Proof Preserved in Memory Box",
         description: `Verified receipt proof saved (${memory.id}).`,
+        actor: "system:tatum-rpc",
         timestamp: new Date().toISOString(),
         walrusMemoryId: memory.id,
       });
@@ -570,6 +833,7 @@ export class TradeService {
       console.warn("[TradeStore] Walrus anchor notice:", err.message);
     }
 
+    persistTradesToDisk();
     return trade;
   }
 
@@ -595,14 +859,22 @@ export class TradeService {
       );
     }
 
+    const actorLower = actor.trim().toLowerCase();
+    const isBuyer = actorLower === trade.buyer.toLowerCase();
+    const isSeller = actorLower === trade.seller.toLowerCase();
+    if (!isBuyer && !isSeller) {
+      throw new Error("Only the Buyer or Seller can attest fulfilment conditions.");
+    }
+
     const nowIso = new Date().toISOString();
-    const rawEvidence = `${trade.reference}:${condition.id}:${actor}:${attestationNote || "attested"}:${nowIso}`;
+    const rawEvidence = `${trade.reference}:${condition.id}:${actorLower}:${attestationNote || "attested"}:${nowIso}`;
     const evidenceHash = `0x${crypto.createHash("sha256").update(rawEvidence).digest("hex")}`;
 
     condition.completed = true;
-    condition.completedBy = actor.toLowerCase();
+    condition.completedBy = actorLower;
     condition.completedAt = nowIso;
-    condition.attestationNote = attestationNote || "Participant attested fulfillment in trade room";
+    condition.attestationNote =
+      attestationNote || "Participant attested fulfillment in trade room";
     condition.evidenceHash = evidenceHash;
 
     const allDone = trade.conditions.every((c) => c.completed);
@@ -614,33 +886,50 @@ export class TradeService {
 
     trade.updatedAt = nowIso;
 
-    trade.activity.push({
-      id: `act-${Date.now()}-cond`,
-      type: "CONDITION_COMPLETED",
-      title: `Condition Attested: ${condition.title}`,
-      description: `Off-chain condition "${condition.title}" attested by ${actor.slice(0, 6)}...${actor.slice(-4)} (SHA-256: ${evidenceHash.slice(0, 12)}...). Remaining conditions: ${trade.conditions.filter((c) => !c.completed).length}.`,
-      actor: actor.toLowerCase(),
-      timestamp: trade.updatedAt,
-    });
-
     try {
-      await walrusMemory.remember({
+      const mem = await walrusMemory.remember({
+        tradeId: trade.id,
         tradeRef: trade.reference,
+        title: `Fulfilment Condition Attested: ${condition.title} — ${trade.reference}`,
+        category: "Fulfilment",
         type: "CONDITION_UPDATE",
-        content: `Participant attestation for ${trade.reference}: Condition "${condition.title}" marked fulfilled by ${actor.toLowerCase()}. Note: "${condition.attestationNote}". Evidence hash: ${evidenceHash}. All conditions satisfied: ${allDone}.`,
+        actor: actorLower,
+        sourceRole: isBuyer ? "buyer" : "seller",
+        content: `Participant attestation for ${trade.reference}: Condition "${condition.title}" marked fulfilled by ${actorLower}. Note: "${condition.attestationNote}". Evidence hash: ${evidenceHash}. All conditions satisfied: ${allDone}.`,
+        structuredPayload: {
+          conditionId,
+          conditionTitle: condition.title,
+          verificationCategory: condition.verificationCategory,
+          attestedBy: actorLower,
+          attestationNote: condition.attestationNote,
+          evidenceHash,
+          allConditionsFulfilled: allDone,
+        },
         metadata: {
           conditionId,
           verificationCategory: condition.verificationCategory,
           evidenceHash,
           allConditionsFulfilled: allDone,
-          actor: actor.toLowerCase(),
+          actor: actorLower,
           participants: [trade.buyer, trade.seller],
         },
+      });
+      condition.walrusMemoryId = mem.id;
+
+      trade.activity.push({
+        id: `act-${Date.now()}-cond`,
+        type: "CONDITION_COMPLETED",
+        title: `Condition Attested: ${condition.title}`,
+        description: `Off-chain condition "${condition.title}" attested by ${actorLower.slice(0, 6)}...${actorLower.slice(-4)} (SHA-256: ${evidenceHash.slice(0, 12)}...). Remaining conditions: ${trade.conditions.filter((c) => !c.completed).length}.`,
+        actor: actorLower,
+        timestamp: trade.updatedAt,
+        walrusMemoryId: mem.id,
       });
     } catch (err: any) {
       console.warn("[TradeStore] Walrus anchor notice:", err.message);
     }
 
+    persistTradesToDisk();
     return trade;
   }
 
@@ -669,6 +958,25 @@ export class TradeService {
     trade.status = allDone ? "ReadyForRelease" : "AwaitingConditions";
     trade.updatedAt = new Date().toISOString();
 
+    const mem = await walrusMemory.remember({
+      tradeId: trade.id,
+      tradeRef: trade.reference,
+      title: `Seller Confirmed Deliverable Fulfilment — ${trade.reference}`,
+      category: "Fulfilment",
+      type: "CONDITION_UPDATE",
+      actor: actorLower,
+      sourceRole: "seller",
+      content: `Seller ${actorLower} confirmed deliverable fulfilment for ${trade.reference}. Trade status: ${trade.status}.`,
+      structuredPayload: {
+        sellerFulfilled: true,
+        seller: actorLower,
+        status: trade.status,
+      },
+      metadata: {
+        participants: [trade.buyer, trade.seller],
+      },
+    });
+
     trade.activity.push({
       id: `act-${Date.now()}-fulfill`,
       type: "SELLER_FULFILLED",
@@ -676,8 +984,10 @@ export class TradeService {
       description: `Seller ${actorLower.slice(0, 6)}...${actorLower.slice(-4)} attested that agreed deliverables have been provided. Ready for buyer inspection and release approval.`,
       actor: actorLower,
       timestamp: trade.updatedAt,
+      walrusMemoryId: mem.id,
     });
 
+    persistTradesToDisk();
     return trade;
   }
 
@@ -694,6 +1004,12 @@ export class TradeService {
       );
     }
 
+    if (trade.status === "Disputed") {
+      throw new Error(
+        "Cannot unilaterally release funds while trade is in Disputed state. Neutral Arbiter must issue a ruling."
+      );
+    }
+
     const actorLower = actor.trim().toLowerCase();
     const isBuyer = actorLower === trade.buyer.toLowerCase();
 
@@ -703,25 +1019,37 @@ export class TradeService {
       );
     }
 
+    const incompleteConditions = trade.conditions.filter((c) => !c.completed);
+    if (incompleteConditions.length > 0) {
+      throw new Error(
+        `Cannot release funds yet: ${incompleteConditions.length} settlement condition(s) remain unfulfilled.`
+      );
+    }
+
     trade.status = "Completed";
     trade.releaseTxHash = releaseTxHash || trade.txHash;
     trade.updatedAt = new Date().toISOString();
 
-    trade.activity.push({
-      id: `act-${Date.now()}-rel`,
-      type: "FUNDS_RELEASED",
-      title: "Escrow Released to Seller — Trade Completed",
-      description: `Buyer ${actorLower.slice(0, 6)}...${actorLower.slice(-4)} authorized settlement release of ${trade.amount} ${trade.asset} to Seller ${trade.seller.slice(0, 6)}...${trade.seller.slice(-4)}.`,
-      actor: actorLower,
-      timestamp: trade.updatedAt,
-      txHash: trade.releaseTxHash,
-    });
-
     try {
-      await walrusMemory.remember({
+      const memory = await walrusMemory.remember({
+        tradeId: trade.id,
         tradeRef: trade.reference,
-        type: "SETTLEMENT_LESSON",
+        title: `Settlement Released & Completed — ${trade.reference}`,
+        category: "Settlement",
+        type: "SETTLEMENT_COMPLETED",
+        actor: actorLower,
+        sourceRole: "buyer",
         content: `Trade ${trade.reference} completed and settled on ${trade.network}. ${trade.amount} ${trade.asset} released to Seller ${trade.seller} with Buyer ${trade.buyer} approval. Deposit tx: ${trade.txHash}.`,
+        structuredPayload: {
+          outcome: "COMPLETED",
+          amount: trade.amount,
+          asset: trade.asset,
+          network: trade.network,
+          buyer: trade.buyer,
+          seller: trade.seller,
+          depositTxHash: trade.txHash,
+          releaseTxHash: trade.releaseTxHash,
+        },
         metadata: {
           outcome: "COMPLETED",
           amount: trade.amount,
@@ -729,13 +1057,26 @@ export class TradeService {
           seller: trade.seller,
           buyer: trade.buyer,
           network: trade.network,
+          txHash: trade.releaseTxHash,
           participants: [trade.buyer, trade.seller],
         },
+      });
+
+      trade.activity.push({
+        id: `act-${Date.now()}-rel`,
+        type: "FUNDS_RELEASED",
+        title: "Escrow Released to Seller — Trade Completed",
+        description: `Buyer ${actorLower.slice(0, 6)}...${actorLower.slice(-4)} authorized settlement release of ${trade.amount} ${trade.asset} to Seller ${trade.seller.slice(0, 6)}...${trade.seller.slice(-4)}.`,
+        actor: actorLower,
+        timestamp: trade.updatedAt,
+        txHash: trade.releaseTxHash,
+        walrusMemoryId: memory.id,
       });
     } catch (err: any) {
       console.warn("[TradeStore] Walrus anchor notice:", err.message);
     }
 
+    persistTradesToDisk();
     return trade;
   }
 
@@ -752,7 +1093,9 @@ export class TradeService {
     if (!trade) throw new Error("Trade not found");
 
     const actorLower = actor.trim().toLowerCase();
-    if (actorLower !== trade.buyer.toLowerCase() && actorLower !== trade.seller.toLowerCase()) {
+    const isBuyer = actorLower === trade.buyer.toLowerCase();
+    const isSeller = actorLower === trade.seller.toLowerCase();
+    if (!isBuyer && !isSeller) {
       throw new Error("Only the Buyer or Seller can raise a dispute.");
     }
 
@@ -773,20 +1116,24 @@ export class TradeService {
 
     trade.disputeEvidence.push(disputeItem);
 
-    trade.activity.push({
-      id: `act-${Date.now()}-disp`,
-      type: "DISPUTE_RAISED",
-      title: "Dispute Lodged — Escrow Frozen",
-      description: `Dispute raised by ${actorLower.slice(0, 6)}...${actorLower.slice(-4)}: "${reason}". Evidence SHA-256 hash ${evidenceHash.slice(0, 14)}... anchored to Walrus Memory.`,
-      actor: actorLower,
-      timestamp: trade.updatedAt,
-    });
-
     try {
       const memory = await walrusMemory.remember({
+        tradeId: trade.id,
         tradeRef: trade.reference,
+        title: `Dispute & Evidence Submitted — ${trade.reference}`,
+        category: "Disputes",
         type: "DISPUTE_EVIDENCE",
+        actor: actorLower,
+        sourceRole: isBuyer ? "buyer" : "seller",
         content: `Dispute filed for ${trade.reference} by ${actorLower}. Claim: "${reason}". Evidence snippet: "${evidenceContent || "N/A"}". SHA-256 hash: ${evidenceHash}.`,
+        structuredPayload: {
+          disputedBy: actorLower,
+          role: isBuyer ? "buyer" : "seller",
+          reason,
+          evidenceSnippet: evidenceContent || "N/A",
+          evidenceHash,
+          arbiter: trade.arbiter,
+        },
         metadata: {
           disputedBy: actorLower,
           evidenceHash,
@@ -796,10 +1143,21 @@ export class TradeService {
         },
       });
       disputeItem.walrusMemoryId = memory.id;
+
+      trade.activity.push({
+        id: `act-${Date.now()}-disp`,
+        type: "DISPUTE_RAISED",
+        title: "Dispute Lodged — Escrow Frozen",
+        description: `Dispute raised by ${actorLower.slice(0, 6)}...${actorLower.slice(-4)}: "${reason}". Evidence SHA-256 hash ${evidenceHash.slice(0, 14)}... preserved in Memory Box.`,
+        actor: actorLower,
+        timestamp: trade.updatedAt,
+        walrusMemoryId: memory.id,
+      });
     } catch (err: any) {
       console.warn("[TradeStore] Walrus anchor notice:", err.message);
     }
 
+    persistTradesToDisk();
     return trade;
   }
 
@@ -846,20 +1204,23 @@ export class TradeService {
     const buyerPct = (buyerSplitBps / 100).toFixed(0);
     const sellerPct = ((10000 - buyerSplitBps) / 100).toFixed(0);
 
-    trade.activity.push({
-      id: `act-${Date.now()}-res`,
-      type: "DISPUTE_RESOLVED",
-      title: `Dispute Resolved by Neutral Arbiter (${buyerPct}% Buyer / ${sellerPct}% Seller)`,
-      description: `Arbiter ${actorLower.slice(0, 6)}...${actorLower.slice(-4)} resolved the dispute: "${resolutionNote}".`,
-      actor: actorLower,
-      timestamp: nowIso,
-    });
-
     try {
-      await walrusMemory.remember({
+      const mem = await walrusMemory.remember({
+        tradeId: trade.id,
         tradeRef: trade.reference,
+        title: `Arbitral Ruling (${buyerPct}% Buyer / ${sellerPct}% Seller) — ${trade.reference}`,
+        category: "Disputes",
         type: "DISPUTE_RESOLUTION",
+        actor: actorLower,
+        sourceRole: "arbiter",
         content: `Neutral Arbiter ${actorLower} resolved dispute for ${trade.reference}: ${buyerPct}% to Buyer (${trade.buyer}), ${sellerPct}% to Seller (${trade.seller}). Ruling: "${resolutionNote}".`,
+        structuredPayload: {
+          arbiter: actorLower,
+          buyerSplitBps,
+          sellerSplitBps: 10000 - buyerSplitBps,
+          resolutionNote,
+          finalTradeStatus: trade.status,
+        },
         metadata: {
           arbiter: actorLower,
           buyerSplitBps,
@@ -867,10 +1228,21 @@ export class TradeService {
           participants: [trade.buyer, trade.seller],
         },
       });
+
+      trade.activity.push({
+        id: `act-${Date.now()}-res`,
+        type: "DISPUTE_RESOLVED",
+        title: `Dispute Resolved by Neutral Arbiter (${buyerPct}% Buyer / ${sellerPct}% Seller)`,
+        description: `Arbiter ${actorLower.slice(0, 6)}...${actorLower.slice(-4)} resolved the dispute: "${resolutionNote}".`,
+        actor: actorLower,
+        timestamp: nowIso,
+        walrusMemoryId: mem.id,
+      });
     } catch (err: any) {
       console.warn("[TradeStore] Walrus anchor notice:", err.message);
     }
 
+    persistTradesToDisk();
     return trade;
   }
 
@@ -897,21 +1269,25 @@ export class TradeService {
     trade.refundTxHash = refundTxHash || trade.txHash;
     trade.updatedAt = new Date().toISOString();
 
-    trade.activity.push({
-      id: `act-${Date.now()}-ref`,
-      type: "FUNDS_REFUNDED",
-      title: "Escrow Refunded to Buyer",
-      description: `${trade.amount} ${trade.asset} refunded to Buyer ${trade.buyer.slice(0, 6)}...${trade.buyer.slice(-4)} (authorized by ${actorLower.slice(0, 6)}...${actorLower.slice(-4)}).`,
-      actor: actorLower,
-      timestamp: trade.updatedAt,
-      txHash: trade.refundTxHash,
-    });
-
     try {
-      await walrusMemory.remember({
+      const mem = await walrusMemory.remember({
+        tradeId: trade.id,
         tradeRef: trade.reference,
-        type: "DISPUTE_RESOLUTION",
+        title: `Principal Refunded to Buyer — ${trade.reference}`,
+        category: "Settlement",
+        type: "SETTLEMENT_REFUNDED",
+        actor: actorLower,
+        sourceRole: isSeller ? "seller" : isArbiter ? "arbiter" : "buyer",
         content: `Trade ${trade.reference} refunded: ${trade.amount} ${trade.asset} returned to Buyer ${trade.buyer} (triggered by ${actorLower}).`,
+        structuredPayload: {
+          outcome: "REFUNDED",
+          amount: trade.amount,
+          asset: trade.asset,
+          buyer: trade.buyer,
+          seller: trade.seller,
+          authorizedBy: actorLower,
+          refundTxHash: trade.refundTxHash,
+        },
         metadata: {
           outcome: "REFUNDED",
           buyer: trade.buyer,
@@ -920,10 +1296,22 @@ export class TradeService {
           participants: [trade.buyer, trade.seller],
         },
       });
+
+      trade.activity.push({
+        id: `act-${Date.now()}-ref`,
+        type: "FUNDS_REFUNDED",
+        title: "Escrow Refunded to Buyer",
+        description: `${trade.amount} ${trade.asset} refunded to Buyer ${trade.buyer.slice(0, 6)}...${trade.buyer.slice(-4)} (authorized by ${actorLower.slice(0, 6)}...${actorLower.slice(-4)}).`,
+        actor: actorLower,
+        timestamp: trade.updatedAt,
+        txHash: trade.refundTxHash,
+        walrusMemoryId: mem.id,
+      });
     } catch (err: any) {
       console.warn("[TradeStore] Walrus anchor notice:", err.message);
     }
 
+    persistTradesToDisk();
     return trade;
   }
 
@@ -933,9 +1321,8 @@ export class TradeService {
    * 2. ACC-2026-9041: A trade in AwaitingAcceptance state to demonstrate invitation links, versioned term amendments, and acceptance.
    */
   async seedInitialShowcaseTrades(): Promise<void> {
-    if (TRADE_STORE.size > 0) return;
-
     await walrusMemory.seedDemonstrationMemories();
+    if (TRADE_STORE.size > 0) return;
 
     // Showcase Trade 1: Backed by a real Base Mainnet transaction that can be verified live via Tatum RPC
     const trade1 = await this.createTrade({

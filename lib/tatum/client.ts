@@ -12,6 +12,7 @@ export interface NetworkConfig {
   name: string;
   slug: string;
   gatewayUrl: string;
+  fallbackRpcUrl: string;
   nativeCurrency: string;
   blockExplorer: string;
   chainId: number;
@@ -23,6 +24,7 @@ export const SUPPORTED_NETWORKS: Record<string, NetworkConfig> = {
     name: "Base Mainnet",
     slug: "base-mainnet",
     gatewayUrl: "https://base-mainnet.gateway.tatum.io",
+    fallbackRpcUrl: "https://mainnet.base.org",
     nativeCurrency: "ETH",
     blockExplorer: "https://basescan.org",
     chainId: 8453,
@@ -32,6 +34,7 @@ export const SUPPORTED_NETWORKS: Record<string, NetworkConfig> = {
     name: "Base Sepolia Testnet",
     slug: "base-sepolia",
     gatewayUrl: "https://base-sepolia.gateway.tatum.io",
+    fallbackRpcUrl: "https://sepolia.base.org",
     nativeCurrency: "ETH",
     blockExplorer: "https://sepolia.basescan.org",
     chainId: 84532,
@@ -41,6 +44,7 @@ export const SUPPORTED_NETWORKS: Record<string, NetworkConfig> = {
     name: "Ethereum Mainnet",
     slug: "ethereum-mainnet",
     gatewayUrl: "https://ethereum-mainnet.gateway.tatum.io",
+    fallbackRpcUrl: "https://ethereum-rpc.publicnode.com",
     nativeCurrency: "ETH",
     blockExplorer: "https://etherscan.io",
     chainId: 1,
@@ -50,14 +54,18 @@ export const SUPPORTED_NETWORKS: Record<string, NetworkConfig> = {
     name: "Polygon Mainnet",
     slug: "polygon-mainnet",
     gatewayUrl: "https://polygon-mainnet.gateway.tatum.io",
+    fallbackRpcUrl: "https://polygon-bor-rpc.publicnode.com",
     nativeCurrency: "POL",
     blockExplorer: "https://polygonscan.com",
     chainId: 137,
   },
 };
 
+const ERC20_TRANSFER_TOPIC =
+  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
 /**
- * Convert a decimal amount string (e.g. "0.000371") to wei without floating point loss.
+ * Convert a decimal amount string (e.g. "0.000371") to wei/smallest unit without floating point loss.
  * Returns null for malformed input.
  */
 export function decimalToWei(amount: string, decimals = 18): bigint | null {
@@ -65,7 +73,10 @@ export function decimalToWei(amount: string, decimals = 18): bigint | null {
   if (!/^\d+(\.\d+)?$/.test(clean)) return null;
   const [whole, fraction = ""] = clean.split(".");
   if (fraction.length > decimals) return null;
-  return BigInt(whole) * BigInt(10) ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, "0") || "0");
+  return (
+    BigInt(whole) * BigInt(10) ** BigInt(decimals) +
+    BigInt(fraction.padEnd(decimals, "0") || "0")
+  );
 }
 
 export function weiToDecimal(wei: bigint, decimals = 18): string {
@@ -79,11 +90,13 @@ export interface VerificationResult {
   verified: boolean;
   status: "confirmed" | "pending" | "reverted" | "not_found" | "mismatch";
   confirmations: number;
+  requiredConfirmations?: number;
   blockNumber?: number;
   txHash: string;
   from?: string;
   to?: string;
   valueEth?: string;
+  asset?: string;
   network: string;
   chainId?: number;
   timestamp?: number;
@@ -112,7 +125,7 @@ export class TatumRpcClient {
   }
 
   /**
-   * Generic JSON-RPC call dispatcher targeting Tatum Gateway
+   * Generic JSON-RPC call dispatcher targeting Tatum Gateway with automatic retry on 429 burst throttling
    */
   async rpcCall(networkSlug: string, method: string, params: any[] = []): Promise<any> {
     const network = SUPPORTED_NETWORKS[networkSlug] || SUPPORTED_NETWORKS["base-mainnet"];
@@ -134,12 +147,25 @@ export class TatumRpcClient {
     };
 
     const startTime = Date.now();
-    const response = await fetch(network.gatewayUrl, {
+    let response = await fetch(network.gatewayUrl, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
       cache: "no-store",
     });
+
+    // If unauthenticated Tatum public gateway rate-limits burst parallel calls (429), fallback to chain RPC
+    if (response.status === 429 && network.fallbackRpcUrl) {
+      response = await fetch(network.fallbackRpcUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(payload),
+        cache: "no-store",
+      });
+    }
 
     const latencyMs = Date.now() - startTime;
 
@@ -184,8 +210,9 @@ export class TatumRpcClient {
    * Validates:
    * 1. Transaction receipt exists on the designated network
    * 2. Transaction status was successful (0x1) vs reverted (0x0)
-   * 3. Calculates actual block confirmation depth
-   * 4. Matches sender and recipient addresses if expected values supplied
+   * 3. Calculates actual block confirmation depth and enforces `minConfirmations`
+   * 4. Matches sender and recipient addresses (including ERC-20 Transfer logs if applicable)
+   * 5. Matches exact expected amount
    */
   async verifyTransaction(
     txHash: string,
@@ -195,20 +222,25 @@ export class TatumRpcClient {
       to?: string;
       allowedRecipients?: string[];
       expectedValueEth?: string;
+      asset?: string;
+      minConfirmations?: number;
     }
   ): Promise<VerificationResult> {
-    const cleanHash = txHash.trim();
+    const cleanHash = (txHash || "").trim();
     const network = SUPPORTED_NETWORKS[networkSlug] || SUPPORTED_NETWORKS["base-mainnet"];
+    const requiredConfirmations = Math.max(1, expected?.minConfirmations || 1);
 
-    if (!cleanHash.startsWith("0x") || cleanHash.length !== 66) {
+    if (!cleanHash.startsWith("0x") || cleanHash.length !== 66 || !/^0x[0-9a-fA-F]{64}$/.test(cleanHash)) {
       return {
         verified: false,
         status: "not_found",
         confirmations: 0,
+        requiredConfirmations,
         txHash: cleanHash,
         network: networkSlug,
         chainId: network.chainId,
-        errorMessage: "Invalid transaction hash format. Expected 66-character hex string starting with 0x.",
+        errorMessage:
+          "Invalid transaction hash format. Expected 66-character hexadecimal string starting with 0x.",
       };
     }
 
@@ -228,6 +260,7 @@ export class TatumRpcClient {
           verified: false,
           status: "not_found",
           confirmations: 0,
+          requiredConfirmations,
           txHash: cleanHash,
           network: networkSlug,
           chainId: network.chainId,
@@ -240,12 +273,14 @@ export class TatumRpcClient {
           verified: false,
           status: "pending",
           confirmations: 0,
+          requiredConfirmations,
           txHash: cleanHash,
           from: tx.from,
           to: tx.to,
           network: networkSlug,
           chainId: network.chainId,
-          errorMessage: "Transaction is currently pending in the mempool and has not been mined yet.",
+          errorMessage:
+            "Transaction is currently pending in the mempool and has not been mined yet.",
         };
       }
 
@@ -258,6 +293,7 @@ export class TatumRpcClient {
           verified: false,
           status: "reverted",
           confirmations,
+          requiredConfirmations,
           blockNumber: txBlock,
           txHash: cleanHash,
           from: receipt.from,
@@ -268,26 +304,53 @@ export class TatumRpcClient {
         };
       }
 
-      let valueEth = "0";
-      const txValueWei = tx && tx.value ? BigInt(tx.value) : BigInt(0);
-      if (tx && tx.value) {
-        valueEth = weiToDecimal(txValueWei);
+      const assetSymbol = (expected?.asset || network.nativeCurrency).toUpperCase();
+      const isStablecoin = assetSymbol === "USDC" || assetSymbol === "USDT";
+      const tokenDecimals = isStablecoin ? 6 : 18;
+
+      let effectiveFrom: string = receipt.from || tx?.from || "";
+      let effectiveTo: string = receipt.to || tx?.to || "";
+      let txValueWei = tx && tx.value ? BigInt(tx.value) : BigInt(0);
+      let valueFormatted = weiToDecimal(txValueWei, 18);
+
+      // Decode ERC-20 Transfer(address,address,uint256) event log when native value is 0 or asset is ERC-20
+      if ((txValueWei === BigInt(0) || isStablecoin) && Array.isArray(receipt.logs)) {
+        const transferLog = receipt.logs.find(
+          (log: any) =>
+            Array.isArray(log.topics) &&
+            log.topics.length >= 3 &&
+            String(log.topics[0]).toLowerCase() === ERC20_TRANSFER_TOPIC
+        );
+        if (transferLog) {
+          effectiveFrom = `0x${String(transferLog.topics[1]).slice(-40)}`;
+          effectiveTo = `0x${String(transferLog.topics[2]).slice(-40)}`;
+          if (transferLog.data && transferLog.data !== "0x") {
+            txValueWei = BigInt(transferLog.data);
+            valueFormatted = weiToDecimal(txValueWei, tokenDecimals);
+          }
+        }
       }
 
       // Sender check if provided
-      if (expected?.from && receipt.from && receipt.from.toLowerCase() !== expected.from.toLowerCase()) {
+      if (
+        expected?.from &&
+        effectiveFrom &&
+        effectiveFrom.toLowerCase() !== expected.from.toLowerCase()
+      ) {
         return {
           verified: false,
           status: "mismatch",
           confirmations,
+          requiredConfirmations,
           blockNumber: txBlock,
           txHash: cleanHash,
-          from: receipt.from,
-          to: receipt.to,
-          valueEth,
+          from: effectiveFrom,
+          to: effectiveTo,
+          valueEth: valueFormatted,
+          asset: assetSymbol,
           network: networkSlug,
           chainId: network.chainId,
-          errorMessage: `Sender mismatch: expected buyer ${expected.from}, but transaction was sent from ${receipt.from}.`,
+          errorMessage: `Sender mismatch: expected buyer ${expected.from}, but transaction was sent from ${effectiveFrom}.`,
         };
       }
 
@@ -299,51 +362,80 @@ export class TatumRpcClient {
         .filter(Boolean)
         .map((a) => a.toLowerCase());
 
-      if (allowedList.length > 0 && receipt.to && !allowedList.includes(receipt.to.toLowerCase())) {
+      if (
+        allowedList.length > 0 &&
+        effectiveTo &&
+        !allowedList.includes(effectiveTo.toLowerCase())
+      ) {
         return {
           verified: false,
           status: "mismatch",
           confirmations,
+          requiredConfirmations,
           blockNumber: txBlock,
           txHash: cleanHash,
-          from: receipt.from,
-          to: receipt.to,
-          valueEth,
+          from: effectiveFrom,
+          to: effectiveTo,
+          valueEth: valueFormatted,
+          asset: assetSymbol,
           network: networkSlug,
           chainId: network.chainId,
-          errorMessage: `Recipient mismatch: transaction recipient ${receipt.to} does not match trade escrow or seller address (${allowedList.join(" or ")}).`,
+          errorMessage: `Recipient mismatch: transaction recipient ${effectiveTo} does not match trade escrow or seller address (${allowedList.join(" or ")}).`,
         };
       }
 
-      // Value check: the transfer must cover the agreed amount (native asset, in wei)
+      // Value check: the transfer must cover the agreed amount
       if (expected?.expectedValueEth) {
-        const expectedWei = decimalToWei(expected.expectedValueEth);
+        const expectedWei = decimalToWei(expected.expectedValueEth, tokenDecimals);
         if (expectedWei !== null && txValueWei < expectedWei) {
           return {
             verified: false,
             status: "mismatch",
             confirmations,
+            requiredConfirmations,
             blockNumber: txBlock,
             txHash: cleanHash,
-            from: receipt.from,
-            to: receipt.to,
-            valueEth,
+            from: effectiveFrom,
+            to: effectiveTo,
+            valueEth: valueFormatted,
+            asset: assetSymbol,
             network: networkSlug,
             chainId: network.chainId,
-            errorMessage: `Amount mismatch: the transaction transferred ${valueEth} ${network.nativeCurrency}, but the agreement requires ${expected.expectedValueEth} ${network.nativeCurrency}.`,
+            errorMessage: `Amount mismatch: the transaction transferred ${valueFormatted} ${assetSymbol}, but the agreement requires ${expected.expectedValueEth} ${assetSymbol}.`,
           };
         }
+      }
+
+      // Confirmation depth check
+      if (confirmations < requiredConfirmations) {
+        return {
+          verified: false,
+          status: "pending",
+          confirmations,
+          requiredConfirmations,
+          blockNumber: txBlock,
+          txHash: cleanHash,
+          from: effectiveFrom,
+          to: effectiveTo,
+          valueEth: valueFormatted,
+          asset: assetSymbol,
+          network: networkSlug,
+          chainId: network.chainId,
+          errorMessage: `Insufficient confirmation depth: transaction has ${confirmations} confirmation(s), but ${requiredConfirmations} confirmation(s) are required.`,
+        };
       }
 
       return {
         verified: true,
         status: "confirmed",
         confirmations,
+        requiredConfirmations,
         blockNumber: txBlock,
         txHash: cleanHash,
-        from: receipt.from,
-        to: receipt.to,
-        valueEth,
+        from: effectiveFrom,
+        to: effectiveTo,
+        valueEth: valueFormatted,
+        asset: assetSymbol,
         network: networkSlug,
         chainId: network.chainId,
         timestamp: Date.now(),
@@ -359,6 +451,7 @@ export class TatumRpcClient {
         verified: false,
         status: "not_found",
         confirmations: 0,
+        requiredConfirmations,
         txHash: cleanHash,
         network: networkSlug,
         chainId: network.chainId,

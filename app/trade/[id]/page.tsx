@@ -70,6 +70,10 @@ export default function SharedTradeRoomPage({
   const [assistantResponse, setAssistantResponse] = useState<any | null>(null);
   const [askingAssistant, setAskingAssistant] = useState(false);
 
+  // Trade Memory Box records
+  const [tradeMemories, setTradeMemories] = useState<any[]>([]);
+  const [selectedMemoryCategory, setSelectedMemoryCategory] = useState<string>("ALL");
+
   const loadTradeRoom = async () => {
     setLoading(true);
     try {
@@ -77,6 +81,9 @@ export default function SharedTradeRoomPage({
       const data = await res.json();
       if (data.success && data.trade) {
         setTrade(data.trade);
+        if (Array.isArray(data.memories)) {
+          setTradeMemories(data.memories);
+        }
         setAmendedTermsText(data.trade.agreedTerms || "");
         if (!txHashInput && data.trade.txHash) {
           setTxHashInput(data.trade.txHash);
@@ -123,6 +130,9 @@ export default function SharedTradeRoomPage({
         throw new Error(data.error || "Operation failed");
       }
       setTrade(data.trade);
+      if (Array.isArray(data.memories)) {
+        setTradeMemories(data.memories);
+      }
       setFeedback({ type: "success", message: successNotice });
     } catch (err: any) {
       setFeedback({ type: "error", message: err.message });
@@ -144,15 +154,21 @@ export default function SharedTradeRoomPage({
         body: JSON.stringify({
           txHash: txHashInput.trim(),
           network: trade.network,
+          actor: activeActor || trade.buyer,
         }),
       });
       const data = await res.json();
+      if (data.trade) {
+        setTrade(data.trade);
+      }
+      if (Array.isArray(data.memories)) {
+        setTradeMemories(data.memories);
+      }
       if (!res.ok || !data.verified) {
         throw new Error(
           data.message || data.error || "Tatum RPC could not verify this transaction receipt."
         );
       }
-      setTrade(data.trade);
       setFeedback({
         type: "success",
         message: `Verified via Tatum RPC: Block #${data.verification.blockNumber} (${data.verification.confirmations} confirmations) on ${trade.network}.`,
@@ -848,6 +864,8 @@ export default function SharedTradeRoomPage({
 
                 {isBuyerActor &&
                   trade.verification?.verified &&
+                  (trade.conditions || []).every((c: any) => c.completed) &&
+                  trade.status !== "Disputed" &&
                   trade.status !== "Completed" &&
                   trade.status !== "Refunded" && (
                     <button
@@ -865,7 +883,19 @@ export default function SharedTradeRoomPage({
                     </button>
                   )}
 
+                {isBuyerActor &&
+                  trade.verification?.verified &&
+                  !(trade.conditions || []).every((c: any) => c.completed) &&
+                  trade.status !== "Disputed" &&
+                  trade.status !== "Completed" &&
+                  trade.status !== "Refunded" && (
+                    <span className="px-3.5 py-1.5 rounded-[3px] bg-[#0E1014] border border-white/[0.08] font-mono-tabular text-[11px] text-[#6E6C65]">
+                      Release Locked · {(trade.conditions || []).filter((c: any) => !c.completed).length} Condition(s) Pending
+                    </span>
+                  )}
+
                 {isSellerActor &&
+                  trade.status !== "Disputed" &&
                   trade.status !== "Completed" &&
                   trade.status !== "Refunded" && (
                     <button
@@ -1013,9 +1043,18 @@ export default function SharedTradeRoomPage({
                   Chronological Settlement &amp; Memory Audit Log
                 </h2>
               </div>
-              <span className="font-mono-tabular text-[11px] text-[#6E6C65]">
-                {(trade.activity || []).length} Entries
-              </span>
+              <div className="flex items-center gap-3">
+                <Link
+                  href={`/memory?tradeRef=${encodeURIComponent(trade.reference)}&view=timeline`}
+                  className="font-mono-tabular text-[11px] text-[#C5A46D] hover:text-[#D6B882] inline-flex items-center gap-1"
+                >
+                  <span>Open in Memory Box</span>
+                  <ArrowUpRight className="w-3 h-3" />
+                </Link>
+                <span className="font-mono-tabular text-[11px] text-[#6E6C65]">
+                  {(trade.activity || []).length} Entries
+                </span>
+              </div>
             </div>
 
             <div className="divide-y divide-white/[0.06]">
@@ -1037,8 +1076,20 @@ export default function SharedTradeRoomPage({
                     <div className="sm:col-span-3 font-mono-tabular text-[11px] text-[#C5A46D] truncate">
                       {act.type}
                     </div>
-                    <div className="sm:col-span-7 space-y-0.5">
-                      <div className="text-[#F4F2ED] font-medium">{act.title}</div>
+                    <div className="sm:col-span-7 space-y-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[#F4F2ED] font-medium">{act.title}</span>
+                        {act.walrusMemoryId && (
+                          <Link
+                            href={`/memory?tradeRef=${encodeURIComponent(
+                              trade.reference
+                            )}&recordId=${encodeURIComponent(act.walrusMemoryId)}`}
+                            className="font-mono-tabular text-[10px] text-[#C5A46D] hover:text-[#F4F2ED] px-1.5 py-0.5 rounded-[2px] bg-[#090A0C] border border-white/[0.08]"
+                          >
+                            {act.walrusMemoryId}
+                          </Link>
+                        )}
+                      </div>
                       <p className="text-[#A6A39B] leading-relaxed">{act.description}</p>
                     </div>
                   </div>
@@ -1047,8 +1098,122 @@ export default function SharedTradeRoomPage({
           </section>
         </div>
 
-        {/* Right 4 Columns: Grounded Context Assistant */}
+        {/* Right 4 Columns: Trade Memory Box & Grounded Context Assistant */}
         <aside className="lg:col-span-4 space-y-6 lg:sticky lg:top-20">
+          {/* TRADE MEMORY BOX PANEL */}
+          <div className="surface-panel rounded-[4px] overflow-hidden">
+            <div className="px-5 py-3.5 bg-[#11141B] border-b border-white/[0.07] flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="font-mono-tabular text-[11px] uppercase tracking-[0.08em] text-[#C5A46D]">
+                  Accord Memory Box
+                </span>
+                <span className="font-mono-tabular text-[10px] px-1.5 py-0.5 rounded-[2px] bg-[#090A0C] border border-white/[0.08] text-[#F4F2ED]">
+                  {tradeMemories.length} Records
+                </span>
+              </div>
+              <Link
+                href={`/memory?tradeRef=${encodeURIComponent(trade.reference)}`}
+                className="font-mono-tabular text-[10px] text-[#C5A46D] hover:text-[#D6B882] inline-flex items-center gap-1"
+              >
+                <span>Full Archive</span>
+                <ArrowUpRight className="w-3 h-3" />
+              </Link>
+            </div>
+
+            <div className="p-4 space-y-3">
+              {/* Category Filter Pills */}
+              <div className="flex flex-wrap gap-1">
+                {[
+                  "ALL",
+                  "Agreements",
+                  "Transactions",
+                  "Fulfilment",
+                  "Disputes",
+                  "Settlement",
+                  "Trade History",
+                ].map((cat) => {
+                  const count =
+                    cat === "ALL"
+                      ? tradeMemories.length
+                      : tradeMemories.filter((m: any) => m.category === cat).length;
+                  return (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setSelectedMemoryCategory(cat)}
+                      className={`px-2 py-1 rounded-[2px] font-mono-tabular text-[10px] transition-colors ${
+                        selectedMemoryCategory === cat
+                          ? "bg-[#C5A46D] text-[#090A0C] font-medium"
+                          : "bg-[#090A0C] text-[#A6A39B] hover:text-[#F4F2ED] border border-white/[0.07]"
+                      }`}
+                    >
+                      {cat} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Memory Records List */}
+              <div className="max-h-72 overflow-y-auto divide-y divide-white/[0.06] border border-white/[0.07] rounded-[3px] bg-[#090A0C]">
+                {tradeMemories
+                  .filter(
+                    (m: any) =>
+                      selectedMemoryCategory === "ALL" || m.category === selectedMemoryCategory
+                  )
+                  .slice(0, 12)
+                  .map((mem: any) => (
+                    <Link
+                      key={mem.id}
+                      href={`/memory?tradeRef=${encodeURIComponent(
+                        trade.reference
+                      )}&recordId=${encodeURIComponent(mem.id)}`}
+                      className="block p-3 hover:bg-[#13161C]/70 transition-colors space-y-1"
+                    >
+                      <div className="flex items-center justify-between gap-2 font-mono-tabular text-[10px]">
+                        <span className="text-[#C5A46D] uppercase">{mem.category}</span>
+                        <span
+                          className={
+                            mem.verifiedOnWalrus
+                              ? "text-[#5CE0A8]"
+                              : mem.persistenceStatus === "write_failed"
+                              ? "text-[#F28B8B]"
+                              : "text-[#C88A32]"
+                          }
+                        >
+                          {mem.verifiedOnWalrus
+                            ? "Confirmed Mainnet"
+                            : mem.persistenceStatus === "write_submitted"
+                            ? "Submitted"
+                            : "Pending (No Keys)"}
+                        </span>
+                      </div>
+                      <div className="text-[12px] font-medium text-[#F4F2ED] leading-snug">
+                        {mem.title || mem.type}
+                      </div>
+                      <div className="flex items-center justify-between font-mono-tabular text-[10px] text-[#6E6C65]">
+                        <span>{mem.id}</span>
+                        <span>
+                          {new Date(mem.timestamp).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </span>
+                      </div>
+                    </Link>
+                  ))}
+
+                {tradeMemories.filter(
+                  (m: any) =>
+                    selectedMemoryCategory === "ALL" || m.category === selectedMemoryCategory
+                ).length === 0 && (
+                  <div className="p-4 text-center font-mono-tabular text-[11px] text-[#6E6C65]">
+                    No memory records in {selectedMemoryCategory}.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
           <div className="surface-panel rounded-[4px] overflow-hidden">
             <div className="px-5 py-3.5 bg-[#11141B] border-b border-white/[0.07] flex items-center justify-between">
               <span className="font-mono-tabular text-[11px] uppercase tracking-[0.08em] text-[#C5A46D]">

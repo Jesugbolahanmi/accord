@@ -76,7 +76,7 @@ function NavigationHeader() {
               href="/memory"
               className="px-3 py-1.5 rounded-[3px] hover:text-[#F4F2ED] hover:bg-white/[0.03] transition-colors"
             >
-              Memory Vault
+              Memory Box
             </Link>
             <Link
               href="/tatum-diagnostic"

@@ -12,13 +12,21 @@ export async function POST(request: Request) {
     }
 
     const memory = await walrusMemory.remember({
+      title: body.title,
+      category: body.category,
+      tradeId: body.tradeId,
       tradeRef: body.tradeRef,
       type: body.type || "TRADE_TERMS",
+      actor: body.actor,
+      sourceRole: body.sourceRole,
       content: body.content,
+      structuredPayload: body.structuredPayload,
       metadata: body.metadata || {},
     });
 
-    return NextResponse.json({ success: true, memory }, { status: 201 });
+    const overview = walrusMemory.getOverviewStats();
+
+    return NextResponse.json({ success: true, memory, overview }, { status: 201 });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }

@@ -228,8 +228,8 @@ export class AccordAIAssistant {
       }
     }
 
-    // 4. Synthesize the answer (Natural-Language Grounded Engine first, plus optional Gemini synthesis if key is configured)
-    let answer = this.buildDeterministicAnswer({
+    // 4. Synthesize the deterministic answer directly from verified application records, Tatum RPC, and Walrus Memory
+    const answer = this.buildDeterministicAnswer({
       rawQuestion,
       questionLower,
       query,
@@ -242,36 +242,7 @@ export class AccordAIAssistant {
       citedMemories,
     });
 
-    let engineMode: AccordContextResponse["engineMode"] = "grounded_deterministic";
-    if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
-      try {
-        const dotenv = await import("dotenv");
-        dotenv.config({ path: ".env.local", override: true });
-      } catch {
-        // Ignore in edge/serverless environments without local filesystem .env.local
-      }
-    }
-    const geminiKey = (
-      process.env.GEMINI_API_KEY ||
-      process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-      ""
-    ).trim();
-
-    if (geminiKey) {
-      const llmAnswer = await this.tryGeminiSynthesis({
-        apiKey: geminiKey,
-        question: rawQuestion,
-        deterministicDraft: answer,
-        verifiedFacts,
-        userClaims,
-        outstandingActions,
-        currentTrade: query.currentTrade,
-      });
-      if (llmAnswer) {
-        answer = llmAnswer;
-        engineMode = "gemini_grounded";
-      }
-    }
+    const engineMode: AccordContextResponse["engineMode"] = "grounded_deterministic";
 
     return {
       question: rawQuestion,
