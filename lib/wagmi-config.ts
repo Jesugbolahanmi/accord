@@ -6,66 +6,49 @@ const STORAGE_ADDRESS_KEY = "accord_active_wallet_address";
 const STORAGE_WALLET_NAME_KEY = "accord_active_wallet_name";
 const STORAGE_CHAIN_KEY = "accord_active_chain_id";
 
-const DEFAULT_PARTICIPANT_ADDRESS = "0xf5BdCe6674389D937dF8aD3363C10fC3fa060B75";
+let activeEip1193Provider: any = null;
 
-export function setAccordSessionWallet(address: string, walletName: string) {
+export function setAccordSessionWallet(address: string, walletName: string, provider?: any) {
   if (typeof window === "undefined") return;
   localStorage.setItem(STORAGE_ADDRESS_KEY, getAddress(address));
   localStorage.setItem(STORAGE_WALLET_NAME_KEY, walletName);
+  if (provider) {
+    activeEip1193Provider = provider;
+  }
 }
 
 export function getAccordSessionWalletName(): string {
-  if (typeof window === "undefined") return "Zerion Wallet";
-  return localStorage.getItem(STORAGE_WALLET_NAME_KEY) || "Zerion Wallet";
+  if (typeof window === "undefined") return "Connected";
+  return localStorage.getItem(STORAGE_WALLET_NAME_KEY) || "Connected";
 }
 
-/**
- * Passive / Direct EVM Wallet Connector for Accord.
- * - First checks passive `eth_accounts` / `selectedAddress` (which never triggers
- *   Blockaid's `.vercel.app` phishing warning popup in Zerion/MetaMask).
- * - Falls back to the user-selected or configured session wallet address so
- *   participants and hackathon judges on `.vercel.app` can connect any wallet
- *   with zero extension warning blocks.
- */
 export const accordWalletConnector = createConnector((config) => {
   let currentChainId: number = base.id;
 
   return {
     id: "accordWallet",
-    name: "Accord Direct Wallet",
+    name: "Web3 Wallet",
     type: "injected",
 
     async connect({ chainId } = {}) {
       if (chainId) currentChainId = chainId;
 
-      let resolvedAddress = DEFAULT_PARTICIPANT_ADDRESS;
+      if (typeof window === "undefined") {
+        throw new Error("Cannot connect wallet on server");
+      }
 
-      if (typeof window !== "undefined") {
-        const saved = localStorage.getItem(STORAGE_ADDRESS_KEY);
-        if (saved && /^0x[a-fA-F0-9]{40}$/.test(saved)) {
-          resolvedAddress = getAddress(saved);
-        } else {
-          // Try passive read-only check (does NOT open extension popup or trigger Blockaid)
-          const eth = (window as any).ethereum;
-          if (eth?.selectedAddress && /^0x[a-fA-F0-9]{40}$/.test(eth.selectedAddress)) {
-            resolvedAddress = getAddress(eth.selectedAddress);
-          } else if (typeof eth?.request === "function") {
-            try {
-              const accounts = await eth.request({ method: "eth_accounts" });
-              if (Array.isArray(accounts) && accounts[0] && /^0x[a-fA-F0-9]{40}$/.test(accounts[0])) {
-                resolvedAddress = getAddress(accounts[0]);
-              }
-            } catch {
-              // Ignore passive read failure
-            }
-          }
-        }
+      const saved = localStorage.getItem(STORAGE_ADDRESS_KEY);
+      if (!saved || !/^0x[a-fA-F0-9]{40}$/.test(saved)) {
+        throw new Error("No wallet account authorized.");
+      }
 
-        localStorage.setItem(STORAGE_ADDRESS_KEY, resolvedAddress);
-        const savedChain = Number(localStorage.getItem(STORAGE_CHAIN_KEY));
-        if (savedChain && [base.id, baseSepolia.id, mainnet.id, polygon.id].includes(savedChain as any)) {
-          currentChainId = savedChain;
-        }
+      const resolvedAddress = getAddress(saved);
+      const savedChain = Number(localStorage.getItem(STORAGE_CHAIN_KEY));
+      if (
+        savedChain &&
+        [base.id, baseSepolia.id, mainnet.id, polygon.id].includes(savedChain as any)
+      ) {
+        currentChainId = savedChain;
       }
 
       const accounts = [resolvedAddress as `0x${string}`] as const;
@@ -76,6 +59,7 @@ export const accordWalletConnector = createConnector((config) => {
     },
 
     async disconnect() {
+      activeEip1193Provider = null;
       if (typeof window !== "undefined") {
         localStorage.removeItem(STORAGE_ADDRESS_KEY);
         localStorage.removeItem(STORAGE_WALLET_NAME_KEY);
@@ -100,6 +84,7 @@ export const accordWalletConnector = createConnector((config) => {
     },
 
     async getProvider() {
+      if (activeEip1193Provider) return activeEip1193Provider;
       if (typeof window !== "undefined" && (window as any).ethereum) {
         return (window as any).ethereum;
       }
@@ -117,6 +102,16 @@ export const accordWalletConnector = createConnector((config) => {
       if (typeof window !== "undefined") {
         localStorage.setItem(STORAGE_CHAIN_KEY, String(chainId));
       }
+      if (activeEip1193Provider?.request) {
+        try {
+          await activeEip1193Provider.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: `0x${chainId.toString(16)}` }],
+          });
+        } catch {
+          // Keep internal chain state synced even if extension declines chain switch
+        }
+      }
       const chain = config.chains.find((c) => c.id === chainId) || base;
       config.emitter.emit("change", { chainId });
       return chain;
@@ -126,6 +121,10 @@ export const accordWalletConnector = createConnector((config) => {
       if (accounts.length === 0) {
         config.emitter.emit("disconnect");
       } else {
+        const addr = getAddress(accounts[0]);
+        if (typeof window !== "undefined") {
+          localStorage.setItem(STORAGE_ADDRESS_KEY, addr);
+        }
         config.emitter.emit("change", {
           accounts: accounts.map((x) => getAddress(x)),
         });
@@ -134,6 +133,9 @@ export const accordWalletConnector = createConnector((config) => {
 
     onChainChanged(chain) {
       const chainId = Number(chain);
+      if (typeof window !== "undefined") {
+        localStorage.setItem(STORAGE_CHAIN_KEY, String(chainId));
+      }
       config.emitter.emit("change", { chainId });
     },
 

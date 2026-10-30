@@ -14,80 +14,139 @@ import {
   setAccordSessionWallet,
   getAccordSessionWalletName,
 } from "@/lib/wagmi-config";
-import { Check, Copy, ChevronDown, X, AlertCircle } from "lucide-react";
+import { Check, Copy, ChevronDown, X, ArrowUpRight, AlertCircle } from "lucide-react";
+
+interface Eip6963ProviderDetail {
+  info: {
+    uuid: string;
+    name: string;
+    icon: string;
+    rdns: string;
+  };
+  provider: any;
+}
 
 interface SuggestedWalletOption {
   id: string;
   name: string;
   subtitle: string;
   installUrl: string;
-  matchTargets: string[];
-  detectFlag?: (eth: any) => boolean;
+  rdnsTargets: string[];
+  resolveFallbackProvider?: () => any;
 }
 
 const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
-  {
-    id: "zerion",
-    name: "Zerion Wallet",
-    subtitle: "Multi-chain DeFi & EVM browser extension",
-    installUrl: "https://zerion.io/wallet",
-    matchTargets: ["zerion", "io.zerion.wallet"],
-    detectFlag: (eth) => Boolean(eth?.isZerion || eth),
-  },
   {
     id: "metaMask",
     name: "MetaMask",
     subtitle: "Browser extension & hardware bridge",
     installUrl: "https://metamask.io/download/",
-    matchTargets: ["metamask", "io.metamask"],
-    detectFlag: (eth) => Boolean(eth?.isMetaMask),
-  },
-  {
-    id: "rabby",
-    name: "Rabby Wallet",
-    subtitle: "Institutional multi-chain EVM security wallet",
-    installUrl: "https://rabby.io/",
-    matchTargets: ["rabby", "io.rabby"],
-    detectFlag: (eth) => Boolean(eth?.isRabby),
-  },
-  {
-    id: "coinbaseWallet",
-    name: "Coinbase Wallet",
-    subtitle: "Smart wallet & browser extension",
-    installUrl: "https://www.coinbase.com/wallet/downloads",
-    matchTargets: ["coinbasewallet", "coinbase", "com.coinbase.wallet"],
-    detectFlag: (eth) => Boolean(eth?.isCoinbaseWallet || eth?.isCoinbaseBrowser),
+    rdnsTargets: ["io.metamask", "io.metamask.flask", "metamask"],
+    resolveFallbackProvider: () => {
+      if (typeof window === "undefined") return null;
+      const eth = (window as any).ethereum;
+      if (Array.isArray(eth?.providers)) {
+        const mm = eth.providers.find(
+          (p: any) => p?.isMetaMask && !p?.isZerion && !p?.isRabby && !p?.isPhantom && !p?.isBraveWallet
+        );
+        if (mm) return mm;
+      }
+      if (eth?.isMetaMask && !eth?.isZerion && !eth?.isRabby && !eth?.isPhantom) {
+        return eth;
+      }
+      return null;
+    },
   },
   {
     id: "phantom",
     name: "Phantom",
     subtitle: "Multi-chain EVM browser wallet",
     installUrl: "https://phantom.com/download",
-    matchTargets: ["phantom", "app.phantom"],
-    detectFlag: (eth) => Boolean(eth?.isPhantom || (window as any)?.phantom?.ethereum),
+    rdnsTargets: ["app.phantom", "phantom"],
+    resolveFallbackProvider: () => {
+      if (typeof window === "undefined") return null;
+      if ((window as any).phantom?.ethereum) {
+        return (window as any).phantom.ethereum;
+      }
+      const eth = (window as any).ethereum;
+      if (eth?.isPhantom) return eth;
+      return null;
+    },
+  },
+  {
+    id: "rabby",
+    name: "Rabby Wallet",
+    subtitle: "Institutional multi-chain EVM security wallet",
+    installUrl: "https://rabby.io/",
+    rdnsTargets: ["io.rabby", "rabby"],
+    resolveFallbackProvider: () => {
+      if (typeof window === "undefined") return null;
+      const eth = (window as any).ethereum;
+      if (Array.isArray(eth?.providers)) {
+        const rabby = eth.providers.find((p: any) => p?.isRabby);
+        if (rabby) return rabby;
+      }
+      if (eth?.isRabby) return eth;
+      return null;
+    },
+  },
+  {
+    id: "coinbaseWallet",
+    name: "Coinbase Wallet",
+    subtitle: "Smart wallet & browser extension",
+    installUrl: "https://www.coinbase.com/wallet/downloads",
+    rdnsTargets: ["com.coinbase.wallet", "coinbase"],
+    resolveFallbackProvider: () => {
+      if (typeof window === "undefined") return null;
+      const eth = (window as any).ethereum;
+      if (Array.isArray(eth?.providers)) {
+        const cb = eth.providers.find((p: any) => p?.isCoinbaseWallet || p?.isCoinbaseBrowser);
+        if (cb) return cb;
+      }
+      if (eth?.isCoinbaseWallet || eth?.isCoinbaseBrowser) return eth;
+      return null;
+    },
+  },
+  {
+    id: "zerion",
+    name: "Zerion Wallet",
+    subtitle: "Multi-chain DeFi & EVM browser extension",
+    installUrl: "https://zerion.io/wallet",
+    rdnsTargets: ["io.zerion.wallet", "zerion"],
+    resolveFallbackProvider: () => {
+      if (typeof window === "undefined") return null;
+      const eth = (window as any).ethereum;
+      if (Array.isArray(eth?.providers)) {
+        const z = eth.providers.find((p: any) => p?.isZerion);
+        if (z) return z;
+      }
+      if (eth?.isZerion) return eth;
+      return null;
+    },
+  },
+  {
+    id: "braveWallet",
+    name: "Brave Wallet",
+    subtitle: "Native browser cryptography wallet",
+    installUrl: "https://brave.com/wallet/",
+    rdnsTargets: ["com.brave.wallet", "brave"],
+    resolveFallbackProvider: () => {
+      if (typeof window === "undefined") return null;
+      const eth = (window as any).ethereum;
+      if (eth?.isBraveWallet) return eth;
+      return null;
+    },
   },
   {
     id: "injected",
     name: "Browser Injected (EIP-1193)",
-    subtitle: "Connect active Web3 provider in this browser",
+    subtitle: "Connect default active Web3 provider in this browser",
     installUrl: "https://ethereum.org/en/wallets/find-wallet/",
-    matchTargets: ["injected"],
-    detectFlag: (eth) => Boolean(eth),
-  },
-];
-
-const PARTICIPANT_PRESETS = [
-  {
-    label: "Buyer Wallet",
-    address: "0xf5BdCe6674389D937dF8aD3363C10fC3fa060B75",
-  },
-  {
-    label: "Seller Wallet",
-    address: "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-  },
-  {
-    label: "Arbiter Wallet",
-    address: "0x12c4E5496F5bAbE7F9159958742D2635B1a084c7",
+    rdnsTargets: [],
+    resolveFallbackProvider: () => {
+      if (typeof window === "undefined") return null;
+      return (window as any).ethereum || null;
+    },
   },
 ];
 
@@ -109,13 +168,14 @@ export function WalletStatusPill() {
   const [modalOpen, setModalOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [connectingId, setConnectingId] = useState<string | null>(null);
-  const [customAddressInput, setCustomAddressInput] = useState(
-    "0xf5BdCe6674389D937dF8aD3363C10fC3fa060B75"
-  );
-  const [activeWalletLabel, setActiveWalletLabel] = useState("Zerion Wallet");
-  const [errorNotice, setErrorNotice] = useState<string | null>(null);
+  const [activeWalletLabel, setActiveWalletLabel] = useState("Connected");
+  const [eip6963Providers, setEip6963Providers] = useState<Eip6963ProviderDetail[]>([]);
+  const [errorNotice, setErrorNotice] = useState<{
+    message: string;
+    installUrl?: string;
+    walletName?: string;
+  } | null>(null);
   const [copiedAddr, setCopiedAddr] = useState(false);
-  const [hasWindowEthereum, setHasWindowEthereum] = useState(false);
 
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -124,26 +184,26 @@ export function WalletStatusPill() {
     setActiveWalletLabel(getAccordSessionWalletName());
   }, []);
 
+  // Discover isolated EIP-6963 wallet providers only when the user opens the Connect modal
   useEffect(() => {
-    if (modalOpen && typeof window !== "undefined") {
-      const eth = (window as any).ethereum;
-      setHasWindowEthereum(Boolean(eth));
-      // Passively prefill from unlocked wallet if available without triggering popup
-      if (eth?.selectedAddress && /^0x[a-fA-F0-9]{40}$/.test(eth.selectedAddress)) {
-        setCustomAddressInput(eth.selectedAddress);
-      } else if (typeof eth?.request === "function") {
-        eth
-          .request({ method: "eth_accounts" })
-          .then((accs: any) => {
-            if (Array.isArray(accs) && accs[0] && /^0x[a-fA-F0-9]{40}$/.test(accs[0])) {
-              setCustomAddressInput(accs[0]);
-            }
-          })
-          .catch(() => {
-            // Ignore passive check
-          });
+    if (!modalOpen || typeof window === "undefined") return;
+
+    const discovered = new Map<string, Eip6963ProviderDetail>();
+
+    const onAnnounce = (event: any) => {
+      const detail = event?.detail as Eip6963ProviderDetail | undefined;
+      if (detail?.info?.rdns && detail?.provider) {
+        discovered.set(detail.info.rdns.toLowerCase(), detail);
+        setEip6963Providers(Array.from(discovered.values()));
       }
-    }
+    };
+
+    window.addEventListener("eip6963:announceProvider", onAnnounce as EventListener);
+    window.dispatchEvent(new Event("eip6963:requestProvider"));
+
+    return () => {
+      window.removeEventListener("eip6963:announceProvider", onAnnounce as EventListener);
+    };
   }, [modalOpen]);
 
   // Close popovers on outside click or Escape
@@ -175,16 +235,34 @@ export function WalletStatusPill() {
     );
   }
 
+  /**
+   * Resolve the isolated provider for a specific wallet option so Zerion (or another
+   * default `window.ethereum` proxy) never hijacks clicks intended for MetaMask or Phantom.
+   */
+  const resolveWalletProvider = (wallet: SuggestedWalletOption): any => {
+    // 1. Check isolated EIP-6963 announced providers first
+    for (const item of eip6963Providers) {
+      const rdns = item.info.rdns.toLowerCase();
+      const name = item.info.name.toLowerCase();
+      if (
+        wallet.rdnsTargets.some(
+          (target) => rdns === target || rdns.includes(target) || name.includes(target)
+        )
+      ) {
+        return item.provider;
+      }
+    }
+
+    // 2. Check wallet-specific window namespace / filtered provider array
+    if (wallet.resolveFallbackProvider) {
+      return wallet.resolveFallbackProvider();
+    }
+
+    return null;
+  };
+
   const isWalletDetected = (wallet: SuggestedWalletOption): boolean => {
-    if (typeof window === "undefined") return false;
-    const eth = (window as any).ethereum;
-    if (wallet.detectFlag && wallet.detectFlag(eth)) {
-      return true;
-    }
-    if (Array.isArray(eth?.providers)) {
-      return eth.providers.some((p: any) => wallet.detectFlag?.(p));
-    }
-    return false;
+    return Boolean(resolveWalletProvider(wallet));
   };
 
   const handleSelectWallet = async (wallet: SuggestedWalletOption) => {
@@ -192,23 +270,43 @@ export function WalletStatusPill() {
     setConnectingId(wallet.id);
 
     try {
-      const cleanAddr = customAddressInput.trim();
-      if (!/^0x[a-fA-F0-9]{40}$/.test(cleanAddr)) {
-        setErrorNotice("Please enter a valid 42-character 0x EVM wallet address above.");
+      const provider = resolveWalletProvider(wallet);
+
+      if (!provider || typeof provider.request !== "function") {
+        setErrorNotice({
+          walletName: wallet.name,
+          message: `${wallet.name} extension was not detected in this browser.`,
+          installUrl: wallet.installUrl,
+        });
         setConnectingId(null);
         return;
       }
 
-      // Store session address & provider label and connect via passive connector
-      // (avoids triggering Blockaid's `.vercel.app` shared-domain warning popup)
-      setAccordSessionWallet(cleanAddr, wallet.name);
+      // Request account authorization directly from the selected wallet's isolated provider
+      const accounts = await provider.request({ method: "eth_requestAccounts" });
+      if (!Array.isArray(accounts) || !accounts[0]) {
+        throw new Error(`No account returned by ${wallet.name}.`);
+      }
+
+      setAccordSessionWallet(accounts[0], wallet.name, provider);
       setActiveWalletLabel(wallet.name);
 
       const targetConnector = connectors[0] || accordWalletConnector;
       await connectAsync({ connector: targetConnector });
       setModalOpen(false);
     } catch (err: any) {
-      setErrorNotice(err?.shortMessage || err?.message || "Connection failed.");
+      const rawMsg = err?.shortMessage || err?.message || "Connection request failed.";
+      const isRejected =
+        rawMsg.toLowerCase().includes("rejected") ||
+        rawMsg.toLowerCase().includes("denied") ||
+        err?.code === 4001;
+      setErrorNotice({
+        walletName: wallet.name,
+        message: isRejected
+          ? `Connection request was declined in ${wallet.name}.`
+          : `Could not connect to ${wallet.name}: ${rawMsg}`,
+        installUrl: isRejected ? undefined : wallet.installUrl,
+      });
     } finally {
       setConnectingId(null);
     }
@@ -354,7 +452,7 @@ export function WalletStatusPill() {
               if (e.target === e.currentTarget) setModalOpen(false);
             }}
           >
-            <div className="w-full max-w-[480px] surface-instrument rounded-[4px] overflow-hidden">
+            <div className="w-full max-w-[460px] surface-instrument rounded-[4px] overflow-hidden">
               {/* Modal Header */}
               <div className="px-5 py-4 bg-[#11141B] border-b border-white/[0.08] flex items-center justify-between">
                 <div>
@@ -380,46 +478,33 @@ export function WalletStatusPill() {
 
               {/* Suggested Wallet Options List */}
               <div className="p-5 space-y-4">
-                {/* Active Wallet Address Selector (Zero-Popup Direct Mode) */}
-                <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.1] space-y-2.5">
-                  <div className="flex items-center justify-between font-mono-tabular text-[10px]">
-                    <span className="uppercase tracking-[0.08em] text-[#C5A46D]">
-                      Active EVM Address
-                    </span>
-                    <span className="text-[#5CE0A8]">Zero-Popup Direct Session</span>
-                  </div>
-                  <input
-                    type="text"
-                    value={customAddressInput}
-                    onChange={(e) => setCustomAddressInput(e.target.value)}
-                    placeholder="0x… (42-character EVM address)"
-                    className="w-full px-3 py-1.5 rounded-[2px] bg-[#0E1014] border border-white/[0.12] font-mono-tabular text-[12px] text-[#F4F2ED]"
-                  />
-                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                    {PARTICIPANT_PRESETS.map((preset) => (
-                      <button
-                        key={preset.label}
-                        type="button"
-                        onClick={() => setCustomAddressInput(preset.address)}
-                        className={`px-2 py-0.5 rounded-[2px] font-mono-tabular text-[10px] border transition-colors ${
-                          customAddressInput.toLowerCase() === preset.address.toLowerCase()
-                            ? "bg-[#C5A46D] text-[#090A0C] border-[#C5A46D] font-medium"
-                            : "bg-[#0E1014] text-[#A6A39B] hover:text-[#F4F2ED] border-white/[0.08]"
-                        }`}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <p className="text-[12px] text-[#A6A39B] leading-relaxed">
+                  Choose your preferred EVM wallet provider to sign agreements or authorize
+                  settlement transactions on Base, Ethereum, or Polygon.
+                </p>
 
                 {errorNotice && (
                   <div
                     role="alert"
-                    className="p-3 rounded-[3px] bg-[#C94A4A]/10 border border-[#C94A4A]/40 text-[12px] flex items-start gap-2 text-[#F28B8B]"
+                    className="p-3.5 rounded-[3px] bg-[#C94A4A]/10 border border-[#C94A4A]/40 text-[12px] space-y-2"
                   >
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                    <span>{errorNotice}</span>
+                    <div className="flex items-start gap-2 text-[#F28B8B]">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{errorNotice.message}</span>
+                    </div>
+                    {errorNotice.installUrl && (
+                      <div className="pl-6">
+                        <a
+                          href={errorNotice.installUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 font-mono-tabular text-[11px] text-[#C5A46D] hover:text-[#D6B882]"
+                        >
+                          <span>Install or open {errorNotice.walletName}</span>
+                          <ArrowUpRight className="w-3 h-3" />
+                        </a>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -434,7 +519,7 @@ export function WalletStatusPill() {
                         type="button"
                         disabled={Boolean(connectingId)}
                         onClick={() => handleSelectWallet(wallet)}
-                        className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-[#13161C] transition-colors group"
+                        className="w-full px-4 py-3.5 flex items-center justify-between gap-3 text-left hover:bg-[#13161C] transition-colors group"
                       >
                         <div className="space-y-0.5">
                           <div className="flex items-center gap-2">
@@ -453,9 +538,13 @@ export function WalletStatusPill() {
                         <div className="font-mono-tabular text-[11px] shrink-0">
                           {isConnecting ? (
                             <span className="text-[#C5A46D]">Connecting…</span>
-                          ) : (
+                          ) : detected ? (
                             <span className="text-[#F4F2ED] group-hover:text-[#C5A46D]">
                               Connect →
+                            </span>
+                          ) : (
+                            <span className="text-[#6E6C65] group-hover:text-[#A6A39B]">
+                              Select →
                             </span>
                           )}
                         </div>
@@ -466,11 +555,11 @@ export function WalletStatusPill() {
 
                 <div className="pt-1 flex items-center justify-between text-[11px] font-mono-tabular text-[#6E6C65]">
                   <span>
-                    {hasWindowEthereum
-                      ? "Passive EIP-1193 provider active"
-                      : "Direct session mode active"}
+                    {eip6963Providers.length > 0
+                      ? `${eip6963Providers.length} isolated EIP-6963 provider(s) active`
+                      : "EIP-1193 browser wallet discovery"}
                   </span>
-                  <span>No extension popup required</span>
+                  <span>Read-only mode supported</span>
                 </div>
               </div>
             </div>
