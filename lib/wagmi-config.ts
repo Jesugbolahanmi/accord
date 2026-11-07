@@ -1,18 +1,51 @@
 import { http, createConfig, createConnector } from "wagmi";
-import { base, baseSepolia, mainnet, polygon } from "wagmi/chains";
-import { getAddress } from "viem";
+import { arbitrum, base, baseSepolia, mainnet, polygon } from "wagmi/chains";
+import { defineChain, getAddress } from "viem";
 
 const STORAGE_ADDRESS_KEY = "accord_active_wallet_address";
 const STORAGE_WALLET_NAME_KEY = "accord_active_wallet_name";
 const STORAGE_CHAIN_KEY = "accord_active_chain_id";
 
-let activeEip1193Provider: any = null;
+export const accordLocalChain = defineChain({
+  id: 31337,
+  name: "Accord Local",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: { default: { http: ["http://127.0.0.1:8545"] } },
+  testnet: true,
+});
 
-export function setAccordSessionWallet(address: string, walletName: string, provider?: any) {
+interface SwitchableEip1193Provider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+}
+
+function isSwitchableEip1193Provider(value: unknown): value is SwitchableEip1193Provider {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "request" in value &&
+    typeof value.request === "function"
+  );
+}
+
+function getProviderErrorCode(error: unknown): number | undefined {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "number"
+  ) {
+    return error.code;
+  }
+  return undefined;
+}
+
+let activeEip1193Provider: SwitchableEip1193Provider | null = null;
+
+export function setAccordSessionWallet(address: string, walletName: string, provider?: unknown) {
   if (typeof window === "undefined") return;
   localStorage.setItem(STORAGE_ADDRESS_KEY, getAddress(address));
   localStorage.setItem(STORAGE_WALLET_NAME_KEY, walletName);
-  if (provider) {
+  if (isSwitchableEip1193Provider(provider)) {
     activeEip1193Provider = provider;
   }
 }
@@ -30,7 +63,19 @@ export const accordWalletConnector = createConnector((config) => {
     name: "Web3 Wallet",
     type: "injected",
 
-    async connect({ chainId } = {}) {
+    async connect<withCapabilities extends boolean = false>({
+      chainId,
+      withCapabilities,
+    }: {
+      chainId?: number;
+      isReconnecting?: boolean;
+      withCapabilities?: withCapabilities | boolean;
+    } = {}): Promise<{
+      accounts: withCapabilities extends true
+        ? readonly { address: `0x${string}`; capabilities: Record<string, unknown> }[]
+        : readonly `0x${string}`[];
+      chainId: number;
+    }> {
       if (chainId) currentChainId = chainId;
 
       if (typeof window === "undefined") {
@@ -44,18 +89,28 @@ export const accordWalletConnector = createConnector((config) => {
 
       const resolvedAddress = getAddress(saved);
       const savedChain = Number(localStorage.getItem(STORAGE_CHAIN_KEY));
-      if (
-        savedChain &&
-        [base.id, baseSepolia.id, mainnet.id, polygon.id].includes(savedChain as any)
-      ) {
+      const supportedChainIds: number[] = [
+        base.id,
+        baseSepolia.id,
+        arbitrum.id,
+        mainnet.id,
+        polygon.id,
+        accordLocalChain.id,
+      ];
+      if (savedChain && supportedChainIds.includes(savedChain)) {
         currentChainId = savedChain;
       }
 
-      const accounts = [resolvedAddress as `0x${string}`] as const;
+      const accounts =
+        withCapabilities === true
+          ? [{ address: resolvedAddress, capabilities: {} }] as const
+          : [resolvedAddress] as const;
       return {
-        accounts,
+        accounts: accounts as unknown as withCapabilities extends true
+          ? readonly { address: `0x${string}`; capabilities: Record<string, unknown> }[]
+          : readonly `0x${string}`[],
         chainId: currentChainId,
-      } as any;
+      };
     },
 
     async disconnect() {
@@ -85,8 +140,9 @@ export const accordWalletConnector = createConnector((config) => {
 
     async getProvider() {
       if (activeEip1193Provider) return activeEip1193Provider;
-      if (typeof window !== "undefined" && (window as any).ethereum) {
-        return (window as any).ethereum;
+      if (typeof window !== "undefined") {
+        const injectedProvider = (window as Window & { ethereum?: unknown }).ethereum;
+        if (isSwitchableEip1193Provider(injectedProvider)) return injectedProvider;
       }
       return {};
     },
@@ -98,21 +154,50 @@ export const accordWalletConnector = createConnector((config) => {
     },
 
     async switchChain({ chainId }) {
+      const chain = config.chains.find((candidate) => candidate.id === chainId);
+      if (!chain) throw new Error(`Unsupported chain ID: ${chainId}`);
+
+      const injectedProvider =
+        typeof window === "undefined"
+          ? undefined
+          : (window as Window & { ethereum?: unknown }).ethereum;
+      const provider =
+        activeEip1193Provider ??
+        (isSwitchableEip1193Provider(injectedProvider) ? injectedProvider : null);
+      if (!provider) throw new Error("The connected wallet does not expose a switchable provider.");
+
+      const hexChainId = `0x${chainId.toString(16)}`;
+      try {
+        await provider.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: hexChainId }],
+        });
+      } catch (error) {
+        if (chainId !== accordLocalChain.id || getProviderErrorCode(error) !== 4902) {
+          throw error;
+        }
+
+        await provider.request({
+          method: "wallet_addEthereumChain",
+          params: [
+            {
+              chainId: hexChainId,
+              chainName: chain.name,
+              nativeCurrency: chain.nativeCurrency,
+              rpcUrls: chain.rpcUrls.default.http,
+            },
+          ],
+        });
+        await provider.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: hexChainId }],
+        });
+      }
+
       currentChainId = chainId;
       if (typeof window !== "undefined") {
         localStorage.setItem(STORAGE_CHAIN_KEY, String(chainId));
       }
-      if (activeEip1193Provider?.request) {
-        try {
-          await activeEip1193Provider.request({
-            method: "wallet_switchEthereumChain",
-            params: [{ chainId: `0x${chainId.toString(16)}` }],
-          });
-        } catch {
-          // Keep internal chain state synced even if extension declines chain switch
-        }
-      }
-      const chain = config.chains.find((c) => c.id === chainId) || base;
       config.emitter.emit("change", { chainId });
       return chain;
     },
@@ -146,14 +231,16 @@ export const accordWalletConnector = createConnector((config) => {
 });
 
 export const wagmiConfig = createConfig({
-  chains: [base, baseSepolia, mainnet, polygon],
+  chains: [base, baseSepolia, arbitrum, mainnet, polygon, accordLocalChain],
   multiInjectedProviderDiscovery: false,
   connectors: [accordWalletConnector],
   transports: {
     [base.id]: http("https://base-mainnet.gateway.tatum.io"),
-    [baseSepolia.id]: http("https://base-sepolia.gateway.tatum.io"),
+    [baseSepolia.id]: http("https://sepolia.base.org"),
+    [arbitrum.id]: http("https://arb1.arbitrum.io/rpc"),
     [mainnet.id]: http("https://ethereum-mainnet.gateway.tatum.io"),
     [polygon.id]: http("https://polygon-mainnet.gateway.tatum.io"),
+    [accordLocalChain.id]: http("http://127.0.0.1:8545"),
   },
   ssr: true,
 });

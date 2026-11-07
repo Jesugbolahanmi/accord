@@ -4,31 +4,32 @@ import { tradeService } from "@/lib/trades/store";
 
 export async function GET() {
   try {
-    await tradeService.seedInitialShowcaseTrades();
-    const seeded = await walrusMemory.seedDemonstrationMemories(false);
+    const memories = walrusMemory.listAllMemories();
     const health = await walrusMemory.checkRelayerHealth();
     const overview = walrusMemory.getOverviewStats();
-    const trades = tradeService.listTrades();
-    const mainnetVerifiedCount = seeded.filter((m) => m.verifiedOnWalrus).length;
+    const trades = await tradeService.listTrades();
+    const mainnetVerifiedCount = memories.filter((memory) => memory.verifiedOnWalrus).length;
 
     return NextResponse.json({
       success: true,
       relayerHealth: health,
       configStatus: health.configStatus,
       overview,
-      count: seeded.length,
+      count: memories.length,
       mainnetVerifiedCount,
-      memories: seeded,
+      memories,
       trades,
     });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 500 }
+    );
   }
 }
 
 export async function POST(request: Request) {
   try {
-    await tradeService.seedInitialShowcaseTrades();
     let forceSync = false;
     let retryMemoryId: string | undefined;
 
@@ -45,19 +46,24 @@ export async function POST(request: Request) {
       retryRecord = await walrusMemory.retryPersistMemory(retryMemoryId);
     }
 
-    const seeded = await walrusMemory.seedDemonstrationMemories(forceSync);
+    let memories = walrusMemory.listAllMemories();
+    if (retryMemoryId) {
+      memories = walrusMemory.listAllMemories();
+    } else if (forceSync) {
+      memories = (await walrusMemory.retryAllPendingMemories()).memories;
+    }
     const health = await walrusMemory.checkRelayerHealth();
     const overview = walrusMemory.getOverviewStats();
-    const trades = tradeService.listTrades();
-    const mainnetVerifiedCount = seeded.filter((m) => m.verifiedOnWalrus).length;
+    const trades = await tradeService.listTrades();
+    const mainnetVerifiedCount = memories.filter((memory) => memory.verifiedOnWalrus).length;
 
     const statusMessage = retryRecord
       ? retryRecord.verifiedOnWalrus
         ? `Confirmed Mainnet persistence for ${retryRecord.id} (Blob ID: ${retryRecord.blobId}).`
         : `Retried ${retryRecord.id} (Retry #${retryRecord.retryCount}). Status: ${retryRecord.persistenceStatus}${!health.credentialsConfigured ? " — Configure MEMWAL_PRIVATE_KEY & MEMWAL_ACCOUNT_ID in .env.local to enable Mainnet writes." : ""}`
-      : mainnetVerifiedCount > 0
-      ? `Confirmed ${mainnetVerifiedCount}/${seeded.length} trade memories on Walrus Memory Mainnet (${health.url}).`
-      : `Preserved ${seeded.length} structured trade memories in Accord Memory Box (Pending Mainnet Persistence). Set MEMWAL_PRIVATE_KEY and MEMWAL_ACCOUNT_ID in .env.local to anchor blobs to ${health.url}.`;
+      : memories.length === 0
+      ? "No saved records to sync."
+      : `Confirmed ${mainnetVerifiedCount} of ${memories.length} saved records on Walrus Memory Mainnet.`;
 
     return NextResponse.json({
       success: true,
@@ -66,12 +72,15 @@ export async function POST(request: Request) {
       relayerHealth: health,
       configStatus: health.configStatus,
       overview,
-      count: seeded.length,
+      count: memories.length,
       mainnetVerifiedCount,
-      memories: seeded,
+      memories,
       trades,
     });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 500 }
+    );
   }
 }

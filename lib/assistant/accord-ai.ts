@@ -19,6 +19,69 @@
 
 import { walrusMemory, WalrusTradeMemory } from "../walrus/memory";
 import { tatum, VerificationResult, SUPPORTED_NETWORKS } from "../tatum/client";
+import type { SettlementCondition, Trade } from "../trades/store";
+
+interface AssistantTradeContext
+  extends Pick<
+    Trade,
+    | "id"
+    | "reference"
+    | "buyer"
+    | "seller"
+    | "arbiter"
+    | "buyerAccepted"
+    | "sellerAccepted"
+    | "asset"
+    | "amount"
+    | "network"
+    | "agreedTerms"
+    | "termsHash"
+    | "expirationTimestamp"
+    | "settlementMode"
+    | "txHash"
+  > {
+  termsVersions: unknown[];
+  conditions: unknown[];
+  disputeEvidence: unknown[];
+  activity: unknown[];
+  status: string;
+  escrowAddress?: string | null;
+  verification?: VerificationResult | null;
+  createdAt?: string;
+}
+
+function isSettlementCondition(value: unknown): value is SettlementCondition {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const condition = value as Record<string, unknown>;
+  return (
+    typeof condition.id === "string" &&
+    typeof condition.title === "string" &&
+    typeof condition.description === "string" &&
+    typeof condition.completed === "boolean" &&
+    (condition.type === "onchain_receipt" ||
+      condition.type === "external_delivery" ||
+      condition.type === "inspection" ||
+      condition.type === "mutual_signature") &&
+    (condition.verificationCategory === "onchain_verification" ||
+      condition.verificationCategory === "offchain_attestation")
+  );
+}
+
+function isDisputeEvidence(
+  value: unknown
+): value is Trade["disputeEvidence"][number] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const evidence = value as Record<string, unknown>;
+  return (
+    typeof evidence.submittedBy === "string" &&
+    typeof evidence.reason === "string" &&
+    typeof evidence.evidenceHash === "string"
+  );
+}
+
+function getTradeConditions(trade: AssistantTradeContext): SettlementCondition[] {
+  return trade.conditions.filter(isSettlementCondition);
+}
 
 export interface AccordContextQuery {
   question: string;
@@ -27,7 +90,7 @@ export interface AccordContextQuery {
   counterparty?: string;
   network?: string;
   txHash?: string;
-  currentTrade?: any;
+  currentTrade?: AssistantTradeContext | null;
 }
 
 export interface AccordContextResponse {
@@ -74,7 +137,6 @@ export class AccordAIAssistant {
    * Process a contextual query grounded in persistent memory & blockchain truth
    */
   async ask(query: AccordContextQuery): Promise<AccordContextResponse> {
-    await walrusMemory.seedDemonstrationMemories();
     const rawQuestion = (query.question || "").trim();
     const questionLower = rawQuestion.toLowerCase();
 
@@ -91,8 +153,8 @@ export class AccordAIAssistant {
     // 2. Perform Tatum RPC verification if a txHash is provided or already verified on the trade
     let onchainVerification: VerificationResult | null = query.currentTrade?.verification || null;
     const targetTx = (query.txHash || query.currentTrade?.txHash || "").trim();
-    const targetNetwork = query.network || query.currentTrade?.network || "base-mainnet";
-    const netConfig = SUPPORTED_NETWORKS[targetNetwork] || SUPPORTED_NETWORKS["base-mainnet"];
+    const targetNetwork = query.network || query.currentTrade?.network || "base-sepolia";
+    const netConfig = SUPPORTED_NETWORKS[targetNetwork] || SUPPORTED_NETWORKS["base-sepolia"];
 
     if (!onchainVerification && targetTx && targetTx.startsWith("0x") && targetTx.length === 66) {
       try {
@@ -101,11 +163,11 @@ export class AccordAIAssistant {
           allowedRecipients: [
             query.currentTrade?.escrowAddress,
             query.currentTrade?.seller,
-          ].filter(Boolean),
+          ].filter((address): address is string => Boolean(address)),
           expectedValueEth: query.currentTrade?.amount,
         });
-      } catch (err: any) {
-        console.warn("[AccordAI] Tatum verification notice:", err.message);
+      } catch (err: unknown) {
+        console.warn("[AccordAI] Tatum verification notice:", errorMessage(err));
       }
     }
 
@@ -183,7 +245,7 @@ export class AccordAIAssistant {
       }
 
       if (conditions && Array.isArray(conditions)) {
-        for (const c of conditions) {
+        for (const c of conditions.filter(isSettlementCondition)) {
           if (c.completed) {
             if (c.type === "onchain_receipt") {
               verifiedFacts.push(
@@ -201,7 +263,7 @@ export class AccordAIAssistant {
           }
         }
 
-        const pendingCount = conditions.filter((c: any) => !c.completed).length;
+        const pendingCount = conditions.filter(isSettlementCondition).filter((c) => !c.completed).length;
         if (pendingCount === 0 && (status === "Funded" || status === "ReadyForRelease")) {
           outstandingActions.push(
             `All settlement conditions are satisfied. Buyer (${query.currentTrade.buyer.slice(0, 8)}...) can now authorize final release of funds to the Seller.`
@@ -210,7 +272,7 @@ export class AccordAIAssistant {
       }
 
       if (query.currentTrade.disputeEvidence?.length > 0) {
-        for (const ev of query.currentTrade.disputeEvidence) {
+        for (const ev of query.currentTrade.disputeEvidence.filter(isDisputeEvidence)) {
           userClaims.push(
             `[Participant Dispute Claim] Submitted by ${ev.submittedBy.slice(0, 8)}...: "${ev.reason}" (Evidence SHA-256: ${ev.evidenceHash.slice(0, 14)}...).`
           );
@@ -348,7 +410,7 @@ export class AccordAIAssistant {
       questionLower.includes("why isn't")
     ) {
       if (trade) {
-        const pendingConds = (trade.conditions || []).filter((c: any) => !c.completed);
+        const pendingConds = getTradeConditions(trade).filter((c) => !c.completed);
         if (trade.status === "AwaitingAcceptance") {
           const whoMustAccept = !trade.sellerAccepted
             ? `Seller (${trade.seller.slice(0, 8)}...)`
@@ -359,7 +421,7 @@ export class AccordAIAssistant {
           return `The trade is in "${trade.status}" status and settlement actions are locked because Tatum RPC has not yet verified a confirmed on-chain deposit receipt (status 0x1) for ${trade.amount} ${trade.asset} on ${netName}. Accord never allows a frontend button alone to mark a trade as funded without a real blockchain receipt in Section II.`;
         }
         if (pendingConds.length > 0) {
-          return `Final fund release is not yet unlocked because ${pendingConds.length} settlement condition${pendingConds.length === 1 ? " is" : "s are"} still incomplete in Section III: ${pendingConds.map((c: any) => `"${c.title}"`).join(", ")}. Complete and attest all conditions to unlock release.`;
+          return `Final fund release is not yet unlocked because ${pendingConds.length} settlement condition${pendingConds.length === 1 ? " is" : "s are"} still incomplete in Section III: ${pendingConds.map((c) => `"${c.title}"`).join(", ")}. Complete and attest all conditions to unlock release.`;
         }
         if (!isBuyer && (questionLower.includes("release") || questionLower.includes("approve"))) {
           return `You are currently viewing the room as ${activeRoleLabel}. Under Accord's authorization rules, only the Buyer (${trade.buyer.slice(0, 8)}...) can unilaterally release principal to the Seller once conditions are met. Switch "View as: Buyer" at the top of the room to test releasing funds.`;
@@ -439,10 +501,7 @@ You are currently viewing the room as the ${activeRoleLabel}.`;
       } else if (onchainVerification?.status === "pending") {
         return `Not yet — Tatum RPC reports transaction ${onchainVerification.txHash.slice(0, 14)}... is still pending in the ${netName} mempool with 0 confirmations. Do not release off-chain deliverables until block confirmation.`;
       } else {
-        const sampleHint = trade?.sampleVerifiableTxHash
-          ? ` In Section II, you can click "Load Real Base Mainnet Tx" and then "Verify via Tatum RPC" to verify the live Base Mainnet transaction (${trade.sampleVerifiableTxHash.slice(0, 12)}...).`
-          : "";
-        return `No — Tatum RPC has not verified a confirmed deposit transaction for this trade yet (current status: "${trade?.status || "AwaitingDeposit"}"). Accord never allows a frontend button alone to mark a trade as funded without a verified blockchain receipt.${sampleHint}`;
+        return `No — Tatum RPC has not verified a confirmed deposit transaction for this trade yet (current status: "${trade?.status || "AwaitingDeposit"}"). Accord never allows a frontend button alone to mark a trade as funded without a verified blockchain receipt.`;
       }
     }
 
@@ -500,7 +559,7 @@ You are currently viewing the room as the ${activeRoleLabel}.`;
           return `To move forward from "AwaitingAcceptance": Select "View as: Seller" (or the non-creator party) in the top-right bar, review the written agreement in Section I, and click "Accept & Sign Terms". If you want to propose changes first, click "Amend Terms" to create Version ${(trade.termsVersions?.length || 1) + 1}.`;
         }
         if (trade.status === "AwaitingDeposit") {
-          return `To fund and verify this trade in Section II: The Buyer transfers ${trade.amount} ${trade.asset} on ${netName}, pastes the 66-character 0x transaction hash into Section II (or clicks "Load Real Base Mainnet Tx" for showcase trade ${trade.reference}), and clicks "Verify via Tatum RPC".`;
+          return `To fund and verify this trade in Section II: The Buyer transfers ${trade.amount} ${trade.asset} on ${netName}, pastes the 66-character 0x transaction hash into Section II, and clicks "Verify via Tatum RPC".`;
         }
         return `To complete settlement from "${trade.status}": First ensure each condition in Section III is attested (anchoring its SHA-256 receipt to Walrus Memory). Once all ${(trade.conditions || []).length} conditions show "Fulfilled", the Buyer clicks "Approve & Release Funds to Seller" in Section III.`;
       }
@@ -521,7 +580,7 @@ You are currently viewing the room as the ${activeRoleLabel}.`;
     ) {
       if (trade) {
         const totalConds = trade.conditions?.length || 0;
-        const doneConds = (trade.conditions || []).filter((c: any) => c.completed).length;
+        const doneConds = getTradeConditions(trade).filter((c) => c.completed).length;
         if (outstandingActions.length > 0) {
           return `Remaining steps before settlement (${doneConds}/${totalConds} conditions satisfied): ${outstandingActions.join(" ")}`;
         }
@@ -576,8 +635,9 @@ You are currently viewing the room as the ${activeRoleLabel}.`;
     if (trade) {
       const createdMs = trade.createdAt ? new Date(trade.createdAt).getTime() : Date.now();
       const elapsedStr = formatDurationHuman(Date.now() - createdMs);
-      const doneConds = (trade.conditions || []).filter((c: any) => c.completed).length;
-      const totalConds = (trade.conditions || []).length;
+      const conditions = getTradeConditions(trade);
+      const doneConds = conditions.filter((c) => c.completed).length;
+      const totalConds = conditions.length;
 
       return `Trade ${trade.reference} (${trade.amount} ${trade.asset} on ${netName}) has been active for ${elapsedStr} and is currently in "${trade.status}" status with ${doneConds} of ${totalConds} conditions satisfied. ${onchainVerification?.verified
           ? `The deposit is verified on-chain via Tatum RPC in Block #${onchainVerification.blockNumber}.`
@@ -599,7 +659,7 @@ You are currently viewing the room as the ${activeRoleLabel}.`;
     verifiedFacts: string[];
     userClaims: string[];
     outstandingActions: string[];
-    currentTrade?: any;
+    currentTrade?: AssistantTradeContext | null;
   }): Promise<string | null> {
     try {
       const { GoogleGenerativeAI } = await import("@google/generative-ai");
@@ -661,11 +721,15 @@ ${params.deterministicDraft}`;
         }
       }
       return null;
-    } catch (err: any) {
-      console.warn("[AccordAI] Gemini synthesis unavailable, using deterministic engine:", err.message);
+    } catch (err: unknown) {
+      console.warn("[AccordAI] Gemini synthesis unavailable, using deterministic engine:", errorMessage(err));
       return null;
     }
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export const accordAI = new AccordAIAssistant();

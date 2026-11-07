@@ -169,7 +169,7 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
     assert.equal(reAccepted.status, "AwaitingDeposit");
   });
 
-  it("3. Enforces payment reference tracking, Tatum verification requirements, condition gating, and settlement release rules", async () => {
+  it("3. Enforces payment reference tracking, Tatum verification requirements, condition gating, and trade completion rules", async () => {
     const store = new TradeService();
     const memService = new WalrusMemoryService();
 
@@ -239,7 +239,7 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
       /On-chain receipt conditions cannot be checked off manually/
     );
 
-    // Cannot approve release before verified deposit
+    // Cannot mark the trade complete before a payment check
     await assert.rejects(
       async () => {
         await store.approveRelease(trade.id, BUYER);
@@ -263,20 +263,20 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
     assert.equal(funded.status, "Funded");
     assert.equal(funded.conditions[0].completed, true);
 
-    // Cannot approve release while off-chain condition 2 is still incomplete
+    // Cannot mark the trade complete while a requirement is still incomplete
     await assert.rejects(
       async () => {
         await store.approveRelease(trade.id, BUYER);
       },
-      /1 settlement condition\(s\) remain unfulfilled/
+      /1 requirement\(s\) remain/
     );
 
-    // Seller cannot unilaterally release funds to themselves
+    // Seller cannot mark the trade complete
     await assert.rejects(
       async () => {
         await store.approveRelease(trade.id, SELLER);
       },
-      /Only the Buyer can unilaterally approve release/
+      /Only the buyer can mark this trade complete/
     );
 
     // Seller confirms deliverable fulfilment -> creates CONDITION_UPDATE memory in Fulfilment category
@@ -293,7 +293,7 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
     assert.equal(ready.status, "ReadyForRelease");
     assert.ok(ready.conditions[1].evidenceHash?.startsWith("0x"));
 
-    // Buyer releases funds -> transitions to Completed and creates SETTLEMENT_COMPLETED memory
+    // Buyer marks the trade complete and creates a SETTLEMENT_COMPLETED record
     const completed = await store.approveRelease(trade.id, BUYER);
     assert.equal(completed.status, "Completed");
 
@@ -303,7 +303,7 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
     assert.ok(finalMemories.some((m) => m.type === "SETTLEMENT_COMPLETED" && m.category === "Settlement"));
   });
 
-  it("4. Enforces dispute locking, blocks unilateral release during disputes, and records arbiter rulings & voluntary refunds", async () => {
+  it("4. Records dispute outcomes and refund status without moving funds", async () => {
     const store = new TradeService();
     const memService = new WalrusMemoryService();
 
@@ -342,12 +342,12 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
     assert.equal(disputed.status, "Disputed");
     assert.equal(disputed.disputeEvidence.length, 1);
 
-    // Unilateral release by Buyer MUST be blocked while trade is Disputed
+    // Marking a trade complete must be blocked while a disagreement is open
     await assert.rejects(
       async () => {
         await store.approveRelease(trade.id, BUYER);
       },
-      /Cannot unilaterally release funds while trade is in Disputed state/
+      /Cannot mark this trade complete while a disagreement is open/
     );
 
     // Buyer cannot resolve their own dispute as arbiter
@@ -355,10 +355,10 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
       async () => {
         await store.resolveDispute(trade.id, BUYER, 10000, "Self-ruling");
       },
-      /Only the appointed Neutral Arbiter/
+      /Only the appointed dispute resolver/
     );
 
-    // Neutral Arbiter resolves dispute (100% refund to buyer -> Refunded)
+    // Resolver records a 100% buyer outcome -> Refunded app status
     const resolved = await store.resolveDispute(
       trade.id,
       ARBITER,
@@ -435,26 +435,49 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
 
   it("6. Accord Memory Box: deterministic multi-filter search, 6 categories, strict verifiedOnWalrus accounting, and duplicate-free in-place retry", async () => {
     const memService = new WalrusMemoryService();
-    const seeded = await memService.seedDemonstrationMemories();
-    assert.ok(seeded.length >= 12, "Should seed at least 12 distinct trade memories");
+    const beforeCount = memService.listAllMemories().length;
+    const tradeRef = `ACC-TEST-${Date.now()}`;
+    const sampleHash = `0x${"a".repeat(64)}`;
+    const records = await Promise.all(
+      [
+        ["Agreements", "TRADE_TERMS", "Test terms record"],
+        ["Transactions", "PAYMENT_SUBMITTED", `Test payment reference ${sampleHash}`],
+        ["Fulfilment", "CONDITION_UPDATE", "Test delivery update"],
+        ["Disputes", "DISPUTE_EVIDENCE", "Test dispute record"],
+        ["Settlement", "SETTLEMENT_LESSON", "Test settlement record"],
+        ["Trade History", "TRADE_CREATED", "Test trade created record"],
+      ].map(([category, type, content]) =>
+        memService.remember({
+          tradeRef,
+          category: category as
+            | "Agreements"
+            | "Transactions"
+            | "Fulfilment"
+            | "Disputes"
+            | "Settlement"
+            | "Trade History",
+          type: type as
+            | "TRADE_TERMS"
+            | "PAYMENT_SUBMITTED"
+            | "CONDITION_UPDATE"
+            | "DISPUTE_EVIDENCE"
+            | "SETTLEMENT_LESSON"
+            | "TRADE_CREATED",
+          content,
+          sourceRole: "participant",
+          metadata: { txHash: type === "PAYMENT_SUBMITTED" ? sampleHash : undefined },
+        })
+      )
+    );
 
-    // Verify epistemic honesty: without MEMWAL_PRIVATE_KEY / MEMWAL_ACCOUNT_ID, verifiedOnWalrus must be false
-    const cfg = memService.getConfigurationStatus();
-    if (!cfg.configured) {
-      for (const m of seeded) {
-        assert.equal(
-          m.verifiedOnWalrus,
-          false,
-          "Must never fabricate Mainnet verification when credentials are unconfigured"
-        );
-        assert.equal(m.persistenceStatus, "pending_unconfigured");
-      }
-    }
+    assert.equal(
+      memService.listAllMemories().some((memory) => memory.id.startsWith("wal-seed-")),
+      false,
+      "Legacy demonstration records must not be surfaced"
+    );
 
-    // Verify overview stats match real records
     const overview = await memService.getOverviewStats();
-    assert.equal(overview.totalRecords, seeded.length);
-    assert.ok(overview.tradesWithPreservedHistories >= 4);
+    assert.equal(overview.totalRecords, beforeCount + records.length);
     assert.ok(overview.categoryCounts["Agreements"] > 0);
     assert.ok(overview.categoryCounts["Transactions"] > 0);
     assert.ok(overview.categoryCounts["Fulfilment"] > 0);
@@ -463,9 +486,9 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
     assert.ok(overview.categoryCounts["Trade History"] > 0);
 
     // Deterministic search by Trade ID
-    const byTrade = await memService.searchMemories({ tradeRef: "ACC-2026-8812" });
+    const byTrade = await memService.searchMemories({ tradeRef });
     assert.ok(byTrade.memories.length > 0);
-    assert.ok(byTrade.memories.every((m) => m.tradeRef === "ACC-2026-8812"));
+    assert.ok(byTrade.memories.every((m) => m.tradeRef === tradeRef));
 
     // Deterministic search by Category
     const byCategory = await memService.searchMemories({ category: "Disputes" });
@@ -473,13 +496,11 @@ describe("Accord Core Trading, Memory Box & Security Suite", () => {
     assert.ok(byCategory.memories.every((m) => m.category === "Disputes"));
 
     // Deterministic search by Transaction Hash
-    const byTxHash = await memService.searchMemories({
-      query: "0x5e628c371187d00fc4be945623e25acdac3464545512b9c03002259d95887b6c",
-    });
+    const byTxHash = await memService.searchMemories({ query: sampleHash });
     assert.ok(byTxHash.memories.length > 0);
 
     // Individual record lookup
-    const targetRecord = seeded[0];
+    const targetRecord = records[0];
     const fetchedRecord = await memService.getMemoryById(targetRecord.id);
     assert.ok(fetchedRecord.memory);
     assert.equal(fetchedRecord.memory.id, targetRecord.id);

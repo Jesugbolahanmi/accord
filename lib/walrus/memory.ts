@@ -21,6 +21,73 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue | undefined };
+type JsonObject = { [key: string]: JsonValue | undefined };
+
+interface MemoryPayloadMetadata extends JsonObject {
+  actor?: string;
+  participants?: string[];
+  network?: string;
+  txHash?: string;
+  amount?: string;
+  asset?: string;
+  termsHash?: string;
+  evidenceHash?: string;
+  userAddress?: string;
+}
+
+interface MemWalRuntimeClient {
+  remember(
+    text: string,
+    namespaceOrOptions?: string | Record<string, unknown>,
+    options?: Record<string, unknown>
+  ): Promise<unknown>;
+  rememberAndWait?(
+    text: string,
+    namespaceOrOptions?: string | Record<string, unknown>,
+    options?: Record<string, unknown>
+  ): Promise<unknown>;
+  getJobStatus?(jobId: string): Promise<unknown>;
+  recall(...args: unknown[]): Promise<unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isMemWalRuntimeClient(value: unknown): value is MemWalRuntimeClient {
+  return (
+    isRecord(value) &&
+    typeof value.remember === "function" &&
+    typeof value.recall === "function"
+  );
+}
+
+function getWriteResult(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function getBlobId(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const result = isRecord(value.result) ? value.result : undefined;
+  if (typeof result?.blob_id === "string") return result.blob_id;
+  return typeof value.blob_id === "string" ? value.blob_id : undefined;
+}
+
+function getStringField(value: JsonObject | undefined, field: string): string | undefined {
+  const fieldValue = value?.[field];
+  return typeof fieldValue === "string" ? fieldValue : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export type MemoryCategory =
   | "Agreements"
@@ -62,13 +129,14 @@ export interface WalrusTradeMemory {
   actor: string;
   sourceRole: "buyer" | "seller" | "arbiter" | "tatum_rpc" | "accord_ledger" | "participant";
   content: string;
-  structuredPayload: Record<string, any>;
+  structuredPayload: JsonObject;
   relatedRecordIds: string[];
   relatedTxHash?: string;
   relatedEvidenceHash?: string;
   relatedTermsHash?: string;
   contentHash: string;
   metadata: {
+    actor?: string;
     participants?: string[];
     network?: string;
     txHash?: string;
@@ -77,7 +145,8 @@ export interface WalrusTradeMemory {
     timestamp: number;
     termsHash?: string;
     evidenceHash?: string;
-    [key: string]: any;
+    userAddress?: string;
+    [key: string]: JsonValue | undefined;
   };
   storedAt: string;
   verifiedOnWalrus: boolean;
@@ -222,6 +291,12 @@ export function defaultTitleForMemory(type: MemoryRecordType, tradeRef: string):
 const ACCORD_MEMORY_CACHE: Map<string, WalrusTradeMemory> = new Map();
 let diskHydrated = false;
 
+function getPersistedMemories(): WalrusTradeMemory[] {
+  return Array.from(ACCORD_MEMORY_CACHE.values()).filter(
+    (memory) => !memory.id.startsWith("wal-seed-")
+  );
+}
+
 function getPersistenceFilePath(): string {
   if (process.env.ACCORD_TEST_MODE === "1") {
     return path.join(os.tmpdir(), `accord-test-memories-${process.pid}.json`);
@@ -247,7 +322,7 @@ function hydrateFromDisk(): void {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         for (const item of parsed) {
-          if (item && item.id) {
+          if (item && item.id && !String(item.id).startsWith("wal-seed-")) {
             ACCORD_MEMORY_CACHE.set(item.id, item);
           }
         }
@@ -261,7 +336,7 @@ function hydrateFromDisk(): void {
 function persistToDisk(): void {
   try {
     const file = getPersistenceFilePath();
-    const arr = Array.from(ACCORD_MEMORY_CACHE.values());
+    const arr = getPersistedMemories();
     fs.writeFileSync(file, JSON.stringify(arr, null, 2), "utf8");
   } catch {
     // Ignore write failure in read-only environments
@@ -272,8 +347,8 @@ export class WalrusMemoryService {
   private serverUrl: string;
   private aggregatorUrl: string;
   private namespace: string;
-  private sdkClient: any = null;
-  private mockClient: any = null;
+  private sdkClient: MemWalRuntimeClient | null = null;
+  private mockClient: MemWalRuntimeClient | null = null;
 
   constructor() {
     this.serverUrl = process.env.MEMWAL_SERVER_URL || "https://relayer.memory.walrus.xyz";
@@ -308,7 +383,7 @@ export class WalrusMemoryService {
   /**
    * Initialize the official @mysten-incubation/memwal Mainnet SDK client when credentials exist
    */
-  private async getMainnetClient(): Promise<any | null> {
+  private async getMainnetClient(): Promise<MemWalRuntimeClient | null> {
     const privateKey = (process.env.MEMWAL_PRIVATE_KEY || "").trim();
     const accountId = (process.env.MEMWAL_ACCOUNT_ID || "").trim();
     if (!privateKey || !accountId) {
@@ -319,15 +394,16 @@ export class WalrusMemoryService {
 
     try {
       const { MemWal } = await import("@mysten-incubation/memwal");
-      this.sdkClient = MemWal.create({
+      const client: unknown = MemWal.create({
         key: privateKey,
         accountId,
         serverUrl: process.env.MEMWAL_SERVER_URL || this.serverUrl,
         namespace: process.env.MEMWAL_NAMESPACE || this.namespace,
       });
+      this.sdkClient = isMemWalRuntimeClient(client) ? client : null;
       return this.sdkClient;
-    } catch (err: any) {
-      console.warn("[WalrusMemory] Failed to initialize MemWal client:", err.message);
+    } catch (err: unknown) {
+      console.warn("[WalrusMemory] Failed to initialize MemWal client:", errorMessage(err));
       return null;
     }
   }
@@ -335,14 +411,15 @@ export class WalrusMemoryService {
   /**
    * Initialize the official MemWalMock client for development-only local indexing
    */
-  private async getMockClient(): Promise<any | null> {
+  private async getMockClient(): Promise<MemWalRuntimeClient | null> {
     if (this.mockClient) return this.mockClient;
     try {
       const { MemWalMock } = await import("@mysten-incubation/memwal");
       if (MemWalMock) {
-        this.mockClient = MemWalMock.create({
+        const client: unknown = MemWalMock.create({
           namespace: this.namespace,
         });
+        this.mockClient = isMemWalRuntimeClient(client) ? client : null;
       }
       return this.mockClient;
     } catch {
@@ -369,13 +446,17 @@ export class WalrusMemoryService {
     }
 
     const sdk = await this.getMainnetClient();
-    if (sdk && typeof sdk.recall === "function") {
+    if (sdk) {
       try {
         const recallRes = await sdk.recall(expectedTradeRef || blobId, {
           limit: 5,
           namespace: this.namespace,
         });
-        if (Array.isArray(recallRes?.results) && recallRes.results.length > 0) {
+        if (
+          isRecord(recallRes) &&
+          Array.isArray(recallRes.results) &&
+          recallRes.results.length > 0
+        ) {
           return true;
         }
       } catch {
@@ -394,7 +475,7 @@ export class WalrusMemoryService {
    */
   async checkRelayerHealth(): Promise<WalrusIntegrationTelemetry> {
     const configStatus = this.getConfigurationStatus();
-    const allMems = Array.from(ACCORD_MEMORY_CACHE.values());
+    const allMems = getPersistedMemories();
 
     const writesConfirmedCount = allMems.filter(
       (m) => m.verifiedOnWalrus && m.persistenceStatus === "confirmed_mainnet"
@@ -414,7 +495,7 @@ export class WalrusMemoryService {
     let relayerWritesReady = false;
     let relayerVersion = "unknown";
     let mode = "production";
-    let cfgData: any = {};
+    let cfgData: Record<string, unknown> = {};
 
     try {
       const [healthRes, cfgRes, aggRes] = await Promise.all([
@@ -424,18 +505,23 @@ export class WalrusMemoryService {
       ]);
 
       if (cfgRes && cfgRes.ok) {
-        cfgData = await cfgRes.json().catch(() => ({}));
+        const configData: unknown = await cfgRes.json().catch(() => ({}));
+        if (isRecord(configData)) cfgData = configData;
       }
       if (aggRes && (aggRes.ok || aggRes.status < 500)) {
         aggregatorReachable = true;
       }
 
       if (healthRes && healthRes.ok) {
-        const data = await healthRes.json().catch(() => ({}));
+        const healthData: unknown = await healthRes.json().catch(() => ({}));
+        const data = isRecord(healthData) ? healthData : {};
         relayerReachable = true;
-        mode = data.mode || "production";
+        mode = typeof data.mode === "string" ? data.mode : "production";
         relayerWritesReady = Boolean(data.write_ready || data.writes === "ok" || data.status === "ok");
-        relayerVersion = data.relayerVersion || data.version || "0.1.0";
+        relayerVersion =
+          (typeof data.relayerVersion === "string" && data.relayerVersion) ||
+          (typeof data.version === "string" && data.version) ||
+          "0.1.0";
       }
     } catch {
       relayerReachable = false;
@@ -475,9 +561,9 @@ export class WalrusMemoryService {
       relayerVersion,
       url: this.serverUrl,
       aggregatorUrl: this.aggregatorUrl,
-      packageId: cfgData.packageId,
-      registryId: cfgData.registryId,
-      suiRpcUrl: cfgData.suiRpcUrl,
+      packageId: typeof cfgData.packageId === "string" ? cfgData.packageId : undefined,
+      registryId: typeof cfgData.registryId === "string" ? cfgData.registryId : undefined,
+      suiRpcUrl: typeof cfgData.suiRpcUrl === "string" ? cfgData.suiRpcUrl : undefined,
       configStatus,
     };
   }
@@ -486,7 +572,7 @@ export class WalrusMemoryService {
    * Compute genuine overview statistics from actual Memory Box records
    */
   getOverviewStats(): MemoryBoxOverview {
-    const all = Array.from(ACCORD_MEMORY_CACHE.values());
+    const all = getPersistedMemories();
     const now = Date.now();
     const dayAgo = now - 24 * 60 * 60 * 1000;
 
@@ -557,8 +643,8 @@ export class WalrusMemoryService {
     actor?: string;
     sourceRole?: WalrusTradeMemory["sourceRole"];
     content: string;
-    structuredPayload?: Record<string, any>;
-    metadata?: Record<string, any>;
+    structuredPayload?: JsonObject;
+    metadata?: MemoryPayloadMetadata;
     waitForWalrusBlob?: boolean;
   }): Promise<WalrusTradeMemory> {
     const existingId = params.id;
@@ -572,13 +658,13 @@ export class WalrusMemoryService {
     const title = params.title || defaultTitleForMemory(params.type, params.tradeRef);
 
     // Find related records for the same trade reference to build a navigable graph
-    const priorForTrade = Array.from(ACCORD_MEMORY_CACHE.values())
+    const priorForTrade = getPersistedMemories()
       .filter((m) => m.tradeRef === params.tradeRef && m.id !== memoryId)
       .sort((a, b) => (b.metadata.timestamp || 0) - (a.metadata.timestamp || 0))
       .slice(0, 6)
       .map((m) => m.id);
 
-    const structuredPayload: Record<string, any> = {
+    const structuredPayload: JsonObject = {
       tradeRef: params.tradeRef,
       category,
       type: params.type,
@@ -616,22 +702,21 @@ export class WalrusMemoryService {
     if (sdk) {
       try {
         if (typeof sdk.rememberAndWait === "function") {
-          const waitRes = await sdk.rememberAndWait(
+          const waitRes = getWriteResult(await sdk.rememberAndWait(
             formattedPayload,
             { namespace: this.namespace },
             { timeoutMs: 25000, pollIntervalMs: 1500 }
-          );
-          jobId = waitRes?.job_id;
-          blobId = waitRes?.result?.blob_id || waitRes?.blob_id || undefined;
+          ));
+          jobId = typeof waitRes.job_id === "string" ? waitRes.job_id : undefined;
+          blobId = getBlobId(waitRes);
         } else {
-          const res = await sdk.remember(formattedPayload, { namespace: this.namespace });
-          jobId = res?.job_id;
+          const res = getWriteResult(
+            await sdk.remember(formattedPayload, { namespace: this.namespace })
+          );
+          jobId = typeof res.job_id === "string" ? res.job_id : undefined;
           if (jobId && typeof sdk.getJobStatus === "function") {
             try {
-              const statusRes = await sdk.getJobStatus(jobId);
-              if (statusRes?.result?.blob_id) {
-                blobId = statusRes.result.blob_id;
-              }
+              blobId = getBlobId(await sdk.getJobStatus(jobId));
             } catch {
               // Job still queued
             }
@@ -662,8 +747,8 @@ export class WalrusMemoryService {
           storageMode = "relayer_error";
           relayerError = "Mainnet relayer did not return a job_id or blob_id.";
         }
-      } catch (err: any) {
-        relayerError = err.message || "Walrus Mainnet relayer request failed";
+      } catch (err: unknown) {
+        relayerError = errorMessage(err) || "Walrus Mainnet relayer request failed";
         persistenceStatus = "write_failed";
         storageMode = "relayer_error";
         verifiedOnWalrus = false;
@@ -671,7 +756,7 @@ export class WalrusMemoryService {
     } else {
       // Unconfigured credentials: write to official MemWalMock for development-only local indexing
       const mock = await this.getMockClient();
-      if (mock && typeof mock.remember === "function") {
+      if (mock) {
         try {
           await mock.remember(formattedPayload, { namespace: this.namespace });
         } catch {
@@ -697,10 +782,12 @@ export class WalrusMemoryService {
       content: params.content,
       structuredPayload,
       relatedRecordIds: priorForTrade,
-      relatedTxHash: params.metadata?.txHash || params.structuredPayload?.txHash,
+      relatedTxHash:
+        params.metadata?.txHash || getStringField(params.structuredPayload, "txHash"),
       relatedEvidenceHash:
-        params.metadata?.evidenceHash || params.structuredPayload?.evidenceHash,
-      relatedTermsHash: params.metadata?.termsHash || params.structuredPayload?.termsHash,
+        params.metadata?.evidenceHash || getStringField(params.structuredPayload, "evidenceHash"),
+      relatedTermsHash:
+        params.metadata?.termsHash || getStringField(params.structuredPayload, "termsHash"),
       contentHash,
       metadata: {
         ...params.metadata,
@@ -730,7 +817,7 @@ export class WalrusMemoryService {
    */
   async retryPersistMemory(memoryId: string): Promise<WalrusTradeMemory> {
     const existing = ACCORD_MEMORY_CACHE.get(memoryId);
-    if (!existing) {
+    if (!existing || existing.id.startsWith("wal-seed-")) {
       throw new Error(`Memory record ${memoryId} not found`);
     }
     if (existing.verifiedOnWalrus && existing.persistenceStatus === "confirmed_mainnet") {
@@ -761,7 +848,7 @@ export class WalrusMemoryService {
     confirmed: number;
     memories: WalrusTradeMemory[];
   }> {
-    const all = Array.from(ACCORD_MEMORY_CACHE.values());
+    const all = getPersistedMemories();
     const pending = all.filter((m) => !m.verifiedOnWalrus);
     let confirmed = 0;
 
@@ -787,10 +874,10 @@ export class WalrusMemoryService {
     relatedMemories: WalrusTradeMemory[];
   } {
     const memory = ACCORD_MEMORY_CACHE.get(memoryId) || null;
-    if (!memory) {
+    if (!memory || memory.id.startsWith("wal-seed-")) {
       return { memory: null, relatedMemories: [] };
     }
-    const relatedMemories = Array.from(ACCORD_MEMORY_CACHE.values())
+    const relatedMemories = getPersistedMemories()
       .filter((m) => m.tradeRef === memory.tradeRef && m.id !== memory.id)
       .sort((a, b) => (a.metadata.timestamp || 0) - (b.metadata.timestamp || 0));
 
@@ -807,7 +894,7 @@ export class WalrusMemoryService {
     const rawQuery = (filters.query || "").trim();
     const queryLower = rawQuery.toLowerCase();
 
-    const allMemories = Array.from(ACCORD_MEMORY_CACHE.values()).sort(
+    const allMemories = getPersistedMemories().sort(
       (a, b) => (b.metadata.timestamp || 0) - (a.metadata.timestamp || 0)
     );
 
@@ -839,7 +926,7 @@ export class WalrusMemoryService {
       if (filters.participant && filters.participant.trim()) {
         const pLower = filters.participant.trim().toLowerCase();
         const actorMatch = mem.actor?.toLowerCase().includes(pLower);
-        const listMatch = (mem.metadata?.participants || []).some((p: string) =>
+        const listMatch = (mem.metadata?.participants || []).some((p) =>
           p.toLowerCase().includes(pLower)
         );
         const userMatch = mem.metadata?.userAddress?.toLowerCase().includes(pLower);
@@ -954,7 +1041,7 @@ export class WalrusMemoryService {
    * Get chronological memories for a specific trade room
    */
   async getMemoriesForTrade(tradeRef: string): Promise<WalrusTradeMemory[]> {
-    return Array.from(ACCORD_MEMORY_CACHE.values())
+    return getPersistedMemories()
       .filter((m) => m.tradeRef.toLowerCase() === tradeRef.toLowerCase())
       .sort((a, b) => (a.metadata.timestamp || 0) - (b.metadata.timestamp || 0));
   }
@@ -963,392 +1050,12 @@ export class WalrusMemoryService {
    * List all indexed memories (newest first)
    */
   listAllMemories(): WalrusTradeMemory[] {
-    return Array.from(ACCORD_MEMORY_CACHE.values()).sort(
+    return getPersistedMemories().sort(
       (a, b) => (b.metadata.timestamp || 0) - (a.metadata.timestamp || 0)
     );
   }
 
-  /**
-   * Seed 12 distinct, meaningful trade memories across all 6 categories.
-   * When forceMainnetSync is true, retries pending memories in-place without duplicating records.
-   */
-  async seedDemonstrationMemories(forceMainnetSync: boolean = false): Promise<WalrusTradeMemory[]> {
-    const existing = Array.from(ACCORD_MEMORY_CACHE.values());
 
-    if (existing.length >= 12) {
-      if (forceMainnetSync) {
-        const retried = await this.retryAllPendingMemories();
-        return retried.memories;
-      }
-      return this.listAllMemories();
-    }
-
-    const baseTime = Date.now() - 3600 * 1000;
-    const seeds: Array<{
-      id: string;
-      title: string;
-      category: MemoryCategory;
-      tradeRef: string;
-      type: MemoryRecordType;
-      actor: string;
-      sourceRole: WalrusTradeMemory["sourceRole"];
-      content: string;
-      structuredPayload: Record<string, any>;
-      metadata: Record<string, any>;
-    }> = [
-      {
-        id: "wal-seed-8812-01",
-        title: "Trade Room Initialized — ACC-2026-8812",
-        category: "Trade History",
-        tradeRef: "ACC-2026-8812",
-        type: "TRADE_CREATED",
-        actor: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-        sourceRole: "buyer",
-        content:
-          "Trade ACC-2026-8812 created by Buyer 0xf5bdce6674389d937df8ad3363c10fc3fa060b75 for 0.000371 ETH on Base Mainnet with Seller 0x0729e2a4716d9f7dd17858d5d504426d228697f7 and Neutral Arbiter 0x12c4E5496F5bAbE7F9159958742D2635B1a084c7.",
-        structuredPayload: {
-          event: "TRADE_CREATED",
-          amount: "0.000371",
-          asset: "ETH",
-          network: "base-mainnet",
-          buyer: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-          seller: "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-          arbiter: "0x12c4E5496F5bAbE7F9159958742D2635B1a084c7",
-        },
-        metadata: {
-          participants: [
-            "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-            "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-          ],
-          amount: "0.000371",
-          asset: "ETH",
-          network: "base-mainnet",
-          timestamp: baseTime + 1000,
-        },
-      },
-      {
-        id: "wal-seed-8812-02",
-        title: "Agreement Version 1 Drafted — ACC-2026-8812",
-        category: "Agreements",
-        tradeRef: "ACC-2026-8812",
-        type: "TRADE_TERMS",
-        actor: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-        sourceRole: "buyer",
-        content:
-          "Agreed P2P Trade Terms (Version 1): 0.000371 ETH on Base Mainnet between Buyer 0xf5bdce6674389d937df8ad3363c10fc3fa060b75 and Seller 0x0729e2a4716d9f7dd17858d5d504426d228697f7. Settlement condition: Tatum RPC verifies Base Mainnet deposit tx 0x5e628c371187d00fc4be945623e25acdac3464545512b9c03002259d95887b6c and Seller delivers cryptographically signed API key.",
-        structuredPayload: {
-          version: 1,
-          amount: "0.000371",
-          asset: "ETH",
-          network: "base-mainnet",
-          termsHash: "0x89ab12cd34ef567890abcdef1234567890abcdef1234567890abcdef12345678",
-        },
-        metadata: {
-          participants: [
-            "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-            "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-          ],
-          amount: "0.000371",
-          asset: "ETH",
-          network: "base-mainnet",
-          termsHash: "0x89ab12cd34ef567890abcdef1234567890abcdef1234567890abcdef12345678",
-          timestamp: baseTime + 2000,
-        },
-      },
-      {
-        id: "wal-seed-8812-03",
-        title: "Bilateral Acceptance Recorded (Version 1) — ACC-2026-8812",
-        category: "Agreements",
-        tradeRef: "ACC-2026-8812",
-        type: "TRADE_ACCEPTANCE",
-        actor: "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-        sourceRole: "seller",
-        content:
-          "Seller 0x0729e2a4716d9f7dd17858d5d504426d228697f7 reviewed and accepted Version 1 terms for trade ACC-2026-8812 on Base Mainnet.",
-        structuredPayload: {
-          acceptedVersion: 1,
-          buyerAccepted: true,
-          sellerAccepted: true,
-          acceptedBy: "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-        },
-        metadata: {
-          participants: [
-            "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-            "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-          ],
-          acceptedVersion: 1,
-          timestamp: baseTime + 3000,
-        },
-      },
-      {
-        id: "wal-seed-8812-04",
-        title: "Tatum RPC Verified Base Mainnet Deposit — ACC-2026-8812",
-        category: "Transactions",
-        tradeRef: "ACC-2026-8812",
-        type: "ONCHAIN_VERIFICATION",
-        actor: "system:tatum-rpc",
-        sourceRole: "tatum_rpc",
-        content:
-          "Tatum RPC verified real Base Mainnet transaction 0x5e628c371187d00fc4be945623e25acdac3464545512b9c03002259d95887b6c in block 53221342 (status 0x1, value 0.000371 ETH from 0xf5bdce6674389d937df8ad3363c10fc3fa060b75 to 0x0729e2a4716d9f7dd17858d5d504426d228697f7).",
-        structuredPayload: {
-          txHash: "0x5e628c371187d00fc4be945623e25acdac3464545512b9c03002259d95887b6c",
-          network: "base-mainnet",
-          chainId: 8453,
-          blockNumber: 53221342,
-          receiptStatus: "0x1",
-          valueEth: "0.000371",
-          from: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-          to: "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-        },
-        metadata: {
-          txHash: "0x5e628c371187d00fc4be945623e25acdac3464545512b9c03002259d95887b6c",
-          network: "base-mainnet",
-          blockNumber: 53221342,
-          verifiedStatus: "0x1",
-          participants: [
-            "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-            "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-          ],
-          timestamp: baseTime + 4000,
-        },
-      },
-      {
-        id: "wal-seed-8812-05",
-        title: "Fulfilment Evidence & Attestation Recorded — ACC-2026-8812",
-        category: "Fulfilment",
-        tradeRef: "ACC-2026-8812",
-        type: "CONDITION_UPDATE",
-        actor: "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-        sourceRole: "seller",
-        content:
-          "Off-chain condition attested: Seller 0x0729e2a4716d9f7dd17858d5d504426d228697f7 submitted signed API bundle receipt (SHA-256: 0x6f9b1c2e8a4d3f5e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f).",
-        structuredPayload: {
-          conditionTitle: "Signed API Bundle Delivery (Off-Chain Attestation)",
-          verificationCategory: "offchain_attestation",
-          attestedBy: "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-          evidenceHash: "0x6f9b1c2e8a4d3f5e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f",
-        },
-        metadata: {
-          conditionId: "cond-offchain-receipt",
-          verificationMethod: "offchain_attestation",
-          evidenceHash: "0x6f9b1c2e8a4d3f5e7b9c0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f",
-          participants: ["0x0729e2a4716d9f7dd17858d5d504426d228697f7"],
-          timestamp: baseTime + 5000,
-        },
-      },
-      {
-        id: "wal-seed-8812-06",
-        title: "Settlement Completed Without Dispute — ACC-2026-8812",
-        category: "Settlement",
-        tradeRef: "ACC-2026-8812",
-        type: "SETTLEMENT_LESSON",
-        actor: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-        sourceRole: "buyer",
-        content:
-          "Trade ACC-2026-8812 settled cleanly on Base Mainnet in 28 minutes with zero disputes. Counterparty 0x0729e2a4716d9f7dd17858d5d504426d228697f7 fulfilled off-chain deliverables promptly after Tatum RPC deposit confirmation.",
-        structuredPayload: {
-          outcome: "COMPLETED",
-          settlementMinutes: 28,
-          releasedAmount: "0.000371 ETH",
-        },
-        metadata: {
-          outcome: "COMPLETED",
-          settlementMinutes: 28,
-          participants: [
-            "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-            "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-          ],
-          timestamp: baseTime + 6000,
-        },
-      },
-      {
-        id: "wal-seed-9041-01",
-        title: "Original Agreement Drafted — ACC-2026-9041",
-        category: "Agreements",
-        tradeRef: "ACC-2026-9041",
-        type: "TRADE_TERMS",
-        actor: "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-        sourceRole: "buyer",
-        content:
-          "Agreed P2P Trade Terms: 1.20 ETH for ENS/Web3 Domain Transfer on Ethereum Mainnet between Buyer 0x71C83647249C0392B7e4136f1c7dC1a978641a96 and Seller 0x3d7b4A8911f4dF2309C8198542F559d873138b1E. Neutral Arbiter: 0x12c4E5496F5bAbE7F9159958742D2635B1a084c7.",
-        structuredPayload: {
-          version: 1,
-          amount: "1.20",
-          asset: "ETH",
-          network: "ethereum-mainnet",
-        },
-        metadata: {
-          participants: [
-            "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-            "0x3d7b4A8911f4dF2309C8198542F559d873138b1E",
-          ],
-          amount: "1.20",
-          asset: "ETH",
-          network: "ethereum-mainnet",
-          timestamp: baseTime + 7000,
-        },
-      },
-      {
-        id: "wal-seed-9041-02",
-        title: "Terms Amended to Version 2 — ACC-2026-9041",
-        category: "Agreements",
-        tradeRef: "ACC-2026-9041",
-        type: "TERMS_AMENDMENT",
-        actor: "0x3d7b4A8911f4dF2309C8198542F559d873138b1E",
-        sourceRole: "seller",
-        content:
-          "Terms amended to Version 2 for ACC-2026-9041 by Seller 0x3d7b4A8911f4dF2309C8198542F559d873138b1E: Extended domain transfer window from 2 hours to 4 hours. Buyer acceptance was automatically reset and subsequently re-confirmed.",
-        structuredPayload: {
-          previousVersion: 1,
-          newVersion: 2,
-          acceptanceInvalidated: true,
-        },
-        metadata: {
-          previousVersion: 1,
-          newVersion: 2,
-          participants: [
-            "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-            "0x3d7b4A8911f4dF2309C8198542F559d873138b1E",
-          ],
-          timestamp: baseTime + 8000,
-        },
-      },
-      {
-        id: "wal-seed-9041-03",
-        title: "Ethereum Mainnet Deposit Confirmation — ACC-2026-9041",
-        category: "Transactions",
-        tradeRef: "ACC-2026-9041",
-        type: "ONCHAIN_VERIFICATION",
-        actor: "system:tatum-rpc",
-        sourceRole: "tatum_rpc",
-        content:
-          "Tatum RPC verified Ethereum Mainnet deposit and ERC-721 transfer receipt for ACC-2026-9041 with 32 block confirmations.",
-        structuredPayload: {
-          network: "ethereum-mainnet",
-          chainId: 1,
-          confirmations: 32,
-          receiptStatus: "0x1",
-        },
-        metadata: {
-          network: "ethereum-mainnet",
-          confirmations: 32,
-          participants: [
-            "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-            "0x3d7b4A8911f4dF2309C8198542F559d873138b1E",
-          ],
-          timestamp: baseTime + 9000,
-        },
-      },
-      {
-        id: "wal-seed-7734-01",
-        title: "Dispute & Return Manifest Evidence Submitted — ACC-2026-7734",
-        category: "Disputes",
-        tradeRef: "ACC-2026-7734",
-        type: "DISPUTE_EVIDENCE",
-        actor: "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-        sourceRole: "buyer",
-        content:
-          "Dispute evidence anchored for trade ACC-2026-7734: Buyer 0x71C83647249C0392B7e4136f1c7dC1a978641a96 submitted courier return manifest (SHA-256 hash 0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855) showing off-chain hardware parcel was returned to sender.",
-        structuredPayload: {
-          disputedBy: "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-          reason: "Deliverable hardware specification mismatch",
-          evidenceHash: "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        },
-        metadata: {
-          evidenceHash: "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          disputedBy: "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-          participants: [
-            "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-            "0x89205A3A3b2A55385750058eE9B6615b8B94611C",
-          ],
-          timestamp: baseTime + 10000,
-        },
-      },
-      {
-        id: "wal-seed-7734-02",
-        title: "Neutral Arbiter Dispute Ruling & Full Refund — ACC-2026-7734",
-        category: "Disputes",
-        tradeRef: "ACC-2026-7734",
-        type: "DISPUTE_RESOLUTION",
-        actor: "0x12c4E5496F5bAbE7F9159958742D2635B1a084c7",
-        sourceRole: "arbiter",
-        content:
-          "Neutral Arbiter 0x12c4E5496F5bAbE7F9159958742D2635B1a084c7 resolved dispute ACC-2026-7734 (10000 bps / 100% refund to buyer) after verifying courier return hash against Seller's dispatch receipt.",
-        structuredPayload: {
-          arbiter: "0x12c4E5496F5bAbE7F9159958742D2635B1a084c7",
-          buyerSplitBps: 10000,
-          sellerSplitBps: 0,
-          resolutionOutcome: "FULL_REFUND_TO_BUYER",
-        },
-        metadata: {
-          arbiter: "0x12c4E5496F5bAbE7F9159958742D2635B1a084c7",
-          buyerSplitBps: 10000,
-          resolution: "FULL_REFUND_TO_BUYER",
-          participants: [
-            "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-            "0x89205A3A3b2A55385750058eE9B6615b8B94611C",
-          ],
-          timestamp: baseTime + 11000,
-        },
-      },
-      {
-        id: "wal-seed-prefs-01",
-        title: "Counterparty Safety Policy — 0x71C8…1a96",
-        category: "Trade History",
-        tradeRef: "ACC-GLOBAL-PREFS",
-        type: "USER_PREFERENCE",
-        actor: "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-        sourceRole: "participant",
-        content:
-          "Trader 0x71C83647249C0392B7e4136f1c7dC1a978641a96 explicit safety preference: Require minimum 12 Tatum RPC block confirmations for trades above 0.5 ETH and always appoint neutral arbiter 0x12c4E5496F5bAbE7F9159958742D2635B1a084c7.",
-        structuredPayload: {
-          userAddress: "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-          minConfirmations: 12,
-          preferredArbiter: "0x12c4E5496F5bAbE7F9159958742D2635B1a084c7",
-        },
-        metadata: {
-          userAddress: "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-          participants: ["0x71C83647249C0392B7e4136f1c7dC1a978641a96"],
-          minConfirmations: 12,
-          timestamp: baseTime + 12000,
-        },
-      },
-      {
-        id: "wal-seed-prefs-02",
-        title: "Counterparty Settlement Policy — 0xf5bd…0b75",
-        category: "Trade History",
-        tradeRef: "ACC-GLOBAL-PREFS",
-        type: "USER_PREFERENCE",
-        actor: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-        sourceRole: "participant",
-        content:
-          "Trader 0xf5bdce6674389d937df8ad3363c10fc3fa060b75 explicit preference: Prefers Base Mainnet for low-latency P2P settlement and requires SHA-256 evidence hashes anchored to Walrus Memory before releasing funds.",
-        structuredPayload: {
-          userAddress: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-          preferredNetwork: "base-mainnet",
-          requireSha256Evidence: true,
-        },
-        metadata: {
-          userAddress: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-          participants: ["0xf5bdce6674389d937df8ad3363c10fc3fa060b75"],
-          preferredNetwork: "base-mainnet",
-          timestamp: baseTime + 13000,
-        },
-      },
-    ];
-
-    const results: WalrusTradeMemory[] = [];
-    for (const seed of seeds) {
-      if (!ACCORD_MEMORY_CACHE.has(seed.id)) {
-        const memory = await this.remember(seed);
-        results.push(memory);
-      } else {
-        results.push(ACCORD_MEMORY_CACHE.get(seed.id)!);
-      }
-    }
-
-    return results;
-  }
 }
 
 export const walrusMemory = new WalrusMemoryService();

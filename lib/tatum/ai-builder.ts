@@ -1,3 +1,5 @@
+import type { VerificationResult } from "./client";
+
 /**
  * Accord - Tatum AI Builder Integration (Bonus Hackathon Feature)
  *
@@ -32,6 +34,25 @@ export interface TatumChainEntry {
   interface: string;
   url: string;
   type: string;
+}
+
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+function isJsonObject(value: unknown): value is { [key: string]: JsonValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return true;
+  }
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isJsonObject(value) && Object.values(value).every(isJsonValue);
 }
 
 export class TatumAIBuilder {
@@ -70,14 +91,16 @@ export class TatumAIBuilder {
   /**
    * Query Tatum supported chains for a network
    */
-  static async getSupportedChains(): Promise<any[]> {
+  static async getSupportedChains(): Promise<JsonValue[]> {
     try {
       const res = await fetch(`${this.BASE_URL}/api/chains`, {
         next: { revalidate: 3600 },
       });
       if (!res.ok) return [];
-      const data = await res.json();
-      return Array.isArray(data) ? data : data.chains || [];
+      const data: unknown = await res.json();
+      if (Array.isArray(data)) return data.filter(isJsonValue);
+      const chains = isJsonObject(data) ? data.chains : undefined;
+      return Array.isArray(chains) ? chains.filter(isJsonValue) : [];
     } catch {
       return [];
     }
@@ -96,7 +119,14 @@ export class TatumAIBuilder {
     monitored: boolean;
     txFound: boolean;
     status: string;
-    details: any;
+    details:
+      | VerificationResult
+      | {
+          address: string;
+          currentBalance: string;
+          expectedAmountEth: string;
+          network: string;
+        };
   }> {
     // Queries Tatum RPC for incoming funds
     const { tatum } = await import("./client");

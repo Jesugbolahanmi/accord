@@ -1,7 +1,24 @@
 import { NextResponse } from "next/server";
+import { isAddress } from "viem";
 import { tradeService } from "@/lib/trades/store";
 import { tatum } from "@/lib/tatum/client";
 import { walrusMemory } from "@/lib/walrus/memory";
+import {
+  getEscrowAddress,
+  isEscrowNetworkEnabled,
+} from "@/lib/contracts/escrow-config.server";
+import { isEvmEscrowNetwork } from "@/lib/contracts/escrow-networks";
+import {
+  createEscrowPublicClient,
+  getEscrowContractVersion,
+  verifyEscrowActionEvent,
+} from "@/lib/contracts/verify-escrow-event";
+import {
+  getAuthorizedPayload,
+  getTradeActionChainId,
+  isTradeActionAuthorization,
+  verifyTradeActionSignature,
+} from "@/lib/trades/action-auth";
 
 export async function POST(
   request: Request,
@@ -9,35 +26,97 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    await tradeService.seedInitialShowcaseTrades();
-    const trade = tradeService.getTrade(id);
+    const trade = await tradeService.getTrade(id);
 
     if (!trade) {
       return NextResponse.json({ success: false, error: "Trade not found" }, { status: 404 });
     }
 
     const body = await request.json();
-    const txHash = (body.txHash || "").trim();
-    const network = body.network || trade.network;
-    const actor = body.actor || trade.buyer;
+    if (
+      !isEvmEscrowNetwork(trade.network) ||
+      trade.asset !== "ETH" ||
+      body.network !== trade.network ||
+      typeof body.txHash !== "string" ||
+      !isAddress(body.actor) ||
+      body.actor.toLowerCase() !== trade.buyer.toLowerCase() ||
+      !isTradeActionAuthorization(body.authorization)
+    ) {
+      return NextResponse.json(
+        { success: false, error: "A buyer signature is required for this network's native ETH escrow deposit." },
+        { status: 401 }
+      );
+    }
+    if (!isEscrowNetworkEnabled(trade.network)) {
+      return NextResponse.json(
+        { success: false, error: "Mainnet escrow verification is disabled or not configured on this server." },
+        { status: 503 }
+      );
+    }
 
-    if (!txHash) {
+    const origin = request.headers.get("origin");
+    const expectedOrigin = new URL(process.env.ACCORD_APP_ORIGIN || request.url).origin;
+    if (!origin || new URL(origin).origin !== expectedOrigin) {
+      return NextResponse.json(
+        { success: false, error: "Wallet authorization origin does not match this app." },
+        { status: 401 }
+      );
+    }
+
+    const chainId = getTradeActionChainId(trade.network);
+    if (!chainId) {
+      return NextResponse.json(
+        { success: false, error: "Unsupported network for deposit verification." },
+        { status: 400 }
+      );
+    }
+
+    const expectedUpdatedAt = BigInt(Date.parse(trade.updatedAt));
+    const isAuthorized = await verifyTradeActionSignature({
+      address: body.actor,
+      signature: body.authorization.signature,
+      authorization: body.authorization,
+      origin: new URL(origin).origin,
+      tradeReference: trade.reference,
+      payload: getAuthorizedPayload(body),
+      chainId,
+      expectedUpdatedAt,
+    });
+    if (!isAuthorized || body.action !== "verify_deposit") {
+      return NextResponse.json(
+        { success: false, error: "The buyer signature is invalid, expired, or for an outdated trade." },
+        { status: 401 }
+      );
+    }
+
+    const txHash = body.txHash.trim();
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
       return NextResponse.json({ success: false, error: "Missing txHash" }, { status: 400 });
     }
 
-    // 1. Preserve payment reference submission in trade history & Memory Box
-    await tradeService.submitPaymentReference(id, actor, txHash);
+    const escrowAddress = getEscrowAddress(trade.network);
+    if (!escrowAddress) {
+      return NextResponse.json(
+        { success: false, error: `${trade.network} escrow is disabled or not configured on the server.` },
+        { status: 503 }
+      );
+    }
 
-    // 2. Verify via Tatum Gateway RPC, allowing deposit either to a configured escrow contract or directly to the seller
-    const allowedRecipients = [trade.escrowAddress, trade.seller].filter(
-      (addr): addr is string => Boolean(addr)
-    );
-    const verification = await tatum.verifyTransaction(txHash, network, {
+    const escrowClient = createEscrowPublicClient(trade.network);
+    const contractVersion = await getEscrowContractVersion(escrowClient, escrowAddress);
+    if (contractVersion !== BigInt(2)) {
+      return NextResponse.json(
+        { success: false, error: "The configured escrow contract is outdated. Deploy and configure version 2 before verifying deposits." },
+        { status: 503 }
+      );
+    }
+
+    const verification = await tatum.verifyTransaction(txHash, trade.network, {
       from: trade.buyer,
-      allowedRecipients,
+      allowedRecipients: [escrowAddress],
       expectedValueEth: trade.amount,
-      asset: trade.asset,
-      minConfirmations: body.minConfirmations ? Number(body.minConfirmations) : 1,
+      asset: "ETH",
+      minConfirmations: 2,
     });
 
     if (!verification.verified || verification.status !== "confirmed") {
@@ -48,12 +127,20 @@ export async function POST(
         status: verification.status,
         message: verification.errorMessage || "Transaction not confirmed on blockchain",
         verification,
-        trade: tradeService.getTrade(id),
+        trade: await tradeService.getTrade(id),
         memories,
       });
     }
 
-    // 3. Record verified deposit in trade store and Memory Box
+    await verifyEscrowActionEvent({
+      client: escrowClient,
+      contractAddress: escrowAddress,
+      trade,
+      txHash: txHash as `0x${string}`,
+      actor: body.actor,
+      expectedEvent: "TradeDeposited",
+    });
+
     const updatedTrade = await tradeService.recordVerifiedDeposit(id, verification);
     const memories = await walrusMemory.getMemoriesForTrade(updatedTrade.reference);
 
@@ -65,7 +152,10 @@ export async function POST(
       verification,
       memories,
     });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 500 }
+    );
   }
 }

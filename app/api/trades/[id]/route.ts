@@ -1,6 +1,24 @@
 import { NextResponse } from "next/server";
 import { tradeService } from "@/lib/trades/store";
 import { walrusMemory } from "@/lib/walrus/memory";
+import {
+  getEscrowAddress,
+  isEscrowNetworkEnabled,
+} from "@/lib/contracts/escrow-config.server";
+import { isEvmEscrowNetwork } from "@/lib/contracts/escrow-networks";
+import { isAddress, type Hash } from "viem";
+import {
+  createEscrowPublicClient,
+  getEscrowContractVersion,
+  verifyEscrowActionEvent,
+  type EscrowActionEvent,
+} from "@/lib/contracts/verify-escrow-event";
+import {
+  getAuthorizedPayload,
+  getTradeActionChainId,
+  isTradeActionAuthorization,
+  verifyTradeActionSignature,
+} from "@/lib/trades/action-auth";
 
 export async function GET(
   request: Request,
@@ -8,18 +26,24 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    await tradeService.seedInitialShowcaseTrades();
-    const trade = tradeService.getTrade(id);
+    const storedTrade = await tradeService.getTrade(id);
 
-    if (!trade) {
+    if (!storedTrade) {
       return NextResponse.json({ success: false, error: "Trade not found" }, { status: 404 });
     }
 
+    const configuredEscrow = getEscrowAddress(storedTrade.network);
+    const trade = configuredEscrow
+      ? { ...storedTrade, escrowAddress: configuredEscrow, settlementMode: "escrow" as const }
+      : storedTrade;
     const memories = await walrusMemory.getMemoriesForTrade(trade.reference);
 
     return NextResponse.json({ success: true, trade, memories });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 500 }
+    );
   }
 }
 
@@ -29,9 +53,102 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
-    await tradeService.seedInitialShowcaseTrades();
     const body = await request.json();
     const action = body.action;
+    const trade = await tradeService.getTrade(id);
+    if (!trade) {
+      return NextResponse.json({ success: false, error: "Trade not found" }, { status: 404 });
+    }
+
+    const origin = request.headers.get("origin");
+    if (!origin) {
+      return NextResponse.json(
+        { success: false, error: "Wallet authorization is required." },
+        { status: 401 }
+      );
+    }
+    const requestOrigin = new URL(origin).origin;
+    const expectedOrigin = new URL(process.env.ACCORD_APP_ORIGIN || request.url).origin;
+    const chainId = getTradeActionChainId(trade.network);
+    if (
+      requestOrigin !== expectedOrigin ||
+      !chainId ||
+      !isEvmEscrowNetwork(trade.network)
+    ) {
+      return NextResponse.json(
+        { success: false, error: "This trade cannot accept wallet-authorized actions on this network or origin." },
+        { status: 400 }
+      );
+    }
+    if (!isEscrowNetworkEnabled(trade.network)) {
+      return NextResponse.json(
+        { success: false, error: "Mainnet escrow actions are disabled or not configured on this server." },
+        { status: 503 }
+      );
+    }
+
+    if (!isAddress(body.actor) || !isTradeActionAuthorization(body.authorization)) {
+      return NextResponse.json(
+        { success: false, error: "A valid participant wallet signature is required." },
+        { status: 401 }
+      );
+    }
+
+    const expectedUpdatedAt = BigInt(Date.parse(trade.updatedAt));
+    const isAuthorized = await verifyTradeActionSignature({
+      address: body.actor,
+      signature: body.authorization.signature,
+      authorization: body.authorization,
+      origin: requestOrigin,
+      tradeReference: trade.reference,
+      payload: getAuthorizedPayload(body),
+      chainId,
+      expectedUpdatedAt,
+    });
+    if (!isAuthorized) {
+      return NextResponse.json(
+        { success: false, error: "The wallet signature is invalid, expired, or for an outdated trade version." },
+        { status: 401 }
+      );
+    }
+
+    const escrowEvents: Record<string, EscrowActionEvent> = {
+      confirm_fulfillment: "FulfillmentConfirmed",
+      approve_release: "TradeReleased",
+      refund: "TradeRefunded",
+    };
+    const expectedEvent = escrowEvents[action];
+    if (expectedEvent) {
+      const escrowAddress = getEscrowAddress(trade.network);
+      if (
+        !escrowAddress ||
+        typeof body.txHash !== "string" ||
+        !/^0x[0-9a-fA-F]{64}$/.test(body.txHash)
+      ) {
+        return NextResponse.json(
+          { success: false, error: `A valid ${trade.network} escrow transaction is required.` },
+          { status: 400 }
+        );
+      }
+
+      const escrowClient = createEscrowPublicClient(trade.network);
+      const contractVersion = await getEscrowContractVersion(escrowClient, escrowAddress);
+      if (contractVersion !== BigInt(2)) {
+        return NextResponse.json(
+          { success: false, error: "The configured escrow contract is outdated. Deploy and configure version 2 before recording escrow actions." },
+          { status: 503 }
+        );
+      }
+
+      await verifyEscrowActionEvent({
+        client: escrowClient,
+        contractAddress: escrowAddress,
+        trade,
+        txHash: body.txHash as Hash,
+        actor: body.actor,
+        expectedEvent,
+      });
+    }
 
     let updatedTrade;
 
@@ -66,7 +183,7 @@ export async function PATCH(
         break;
 
       case "confirm_fulfillment":
-        if (!body.actor) throw new Error("Missing actor wallet address");
+        if (!body.actor || !body.txHash) throw new Error("Missing actor wallet address or escrow transaction hash");
         updatedTrade = await tradeService.confirmFulfillment(id, body.actor);
         break;
 
@@ -114,7 +231,10 @@ export async function PATCH(
     const memories = await walrusMemory.getMemoriesForTrade(updatedTrade.reference);
 
     return NextResponse.json({ success: true, trade: updatedTrade, memories });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 400 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 400 }
+    );
   }
 }

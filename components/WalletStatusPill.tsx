@@ -14,6 +14,7 @@ import {
   setAccordSessionWallet,
   getAccordSessionWalletName,
 } from "@/lib/wagmi-config";
+import type { EIP1193Provider } from "viem";
 import { Check, Copy, ChevronDown, X, ArrowUpRight, AlertCircle } from "lucide-react";
 
 interface Eip6963ProviderDetail {
@@ -23,7 +24,7 @@ interface Eip6963ProviderDetail {
     icon: string;
     rdns: string;
   };
-  provider: any;
+  provider: EIP1193Provider;
 }
 
 interface SuggestedWalletOption {
@@ -32,7 +33,48 @@ interface SuggestedWalletOption {
   subtitle: string;
   installUrl: string;
   rdnsTargets: string[];
-  resolveFallbackProvider?: () => any;
+  resolveFallbackProvider?: () => EIP1193Provider | null;
+}
+
+type ProviderRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is ProviderRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function isEip1193Provider(value: unknown): value is EIP1193Provider {
+  return (
+    isRecord(value) &&
+    typeof value.request === "function" &&
+    typeof value.on === "function" &&
+    typeof value.removeListener === "function"
+  );
+}
+
+function isEip6963ProviderDetail(value: unknown): value is Eip6963ProviderDetail {
+  if (!isRecord(value) || !isRecord(value.info)) return false;
+  const { info } = value;
+  return (
+    typeof info.uuid === "string" &&
+    typeof info.name === "string" &&
+    typeof info.icon === "string" &&
+    typeof info.rdns === "string" &&
+    isEip1193Provider(value.provider)
+  );
+}
+
+function hasProviderFlag(value: unknown, flag: string): boolean {
+  return isRecord(value) && value[flag] === true;
+}
+
+function getInjectedEthereum(): ProviderRecord | null {
+  if (typeof window === "undefined") return null;
+  const browserWindow = window as Window & { ethereum?: unknown };
+  return isRecord(browserWindow.ethereum) ? browserWindow.ethereum : null;
+}
+
+function getProviderList(ethereum: ProviderRecord): unknown[] {
+  return Array.isArray(ethereum.providers) ? ethereum.providers : [];
 }
 
 const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
@@ -43,16 +85,26 @@ const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
     installUrl: "https://metamask.io/download/",
     rdnsTargets: ["io.metamask", "io.metamask.flask", "metamask"],
     resolveFallbackProvider: () => {
-      if (typeof window === "undefined") return null;
-      const eth = (window as any).ethereum;
-      if (Array.isArray(eth?.providers)) {
-        const mm = eth.providers.find(
-          (p: any) => p?.isMetaMask && !p?.isZerion && !p?.isRabby && !p?.isPhantom && !p?.isBraveWallet
+      const eth = getInjectedEthereum();
+      if (eth) {
+        const mm = getProviderList(eth).find(
+          (provider) =>
+            hasProviderFlag(provider, "isMetaMask") &&
+            !hasProviderFlag(provider, "isZerion") &&
+            !hasProviderFlag(provider, "isRabby") &&
+            !hasProviderFlag(provider, "isPhantom") &&
+            !hasProviderFlag(provider, "isBraveWallet")
         );
-        if (mm) return mm;
+        if (isEip1193Provider(mm)) return mm;
       }
-      if (eth?.isMetaMask && !eth?.isZerion && !eth?.isRabby && !eth?.isPhantom) {
-        return eth;
+      if (
+        eth &&
+        hasProviderFlag(eth, "isMetaMask") &&
+        !hasProviderFlag(eth, "isZerion") &&
+        !hasProviderFlag(eth, "isRabby") &&
+        !hasProviderFlag(eth, "isPhantom")
+      ) {
+        return isEip1193Provider(eth) ? eth : null;
       }
       return null;
     },
@@ -65,11 +117,13 @@ const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
     rdnsTargets: ["app.phantom", "phantom"],
     resolveFallbackProvider: () => {
       if (typeof window === "undefined") return null;
-      if ((window as any).phantom?.ethereum) {
-        return (window as any).phantom.ethereum;
+      const browserWindow = window as Window & { phantom?: unknown };
+      if (isRecord(browserWindow.phantom)) {
+        const phantomEthereum = browserWindow.phantom.ethereum;
+        if (isEip1193Provider(phantomEthereum)) return phantomEthereum;
       }
-      const eth = (window as any).ethereum;
-      if (eth?.isPhantom) return eth;
+      const eth = getInjectedEthereum();
+      if (hasProviderFlag(eth, "isPhantom") && isEip1193Provider(eth)) return eth;
       return null;
     },
   },
@@ -80,13 +134,12 @@ const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
     installUrl: "https://rabby.io/",
     rdnsTargets: ["io.rabby", "rabby"],
     resolveFallbackProvider: () => {
-      if (typeof window === "undefined") return null;
-      const eth = (window as any).ethereum;
-      if (Array.isArray(eth?.providers)) {
-        const rabby = eth.providers.find((p: any) => p?.isRabby);
-        if (rabby) return rabby;
+      const eth = getInjectedEthereum();
+      if (eth) {
+        const rabby = getProviderList(eth).find((provider) => hasProviderFlag(provider, "isRabby"));
+        if (isEip1193Provider(rabby)) return rabby;
       }
-      if (eth?.isRabby) return eth;
+      if (hasProviderFlag(eth, "isRabby") && isEip1193Provider(eth)) return eth;
       return null;
     },
   },
@@ -97,13 +150,22 @@ const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
     installUrl: "https://www.coinbase.com/wallet/downloads",
     rdnsTargets: ["com.coinbase.wallet", "coinbase"],
     resolveFallbackProvider: () => {
-      if (typeof window === "undefined") return null;
-      const eth = (window as any).ethereum;
-      if (Array.isArray(eth?.providers)) {
-        const cb = eth.providers.find((p: any) => p?.isCoinbaseWallet || p?.isCoinbaseBrowser);
-        if (cb) return cb;
+      const eth = getInjectedEthereum();
+      if (eth) {
+        const cb = getProviderList(eth).find(
+          (provider) =>
+            hasProviderFlag(provider, "isCoinbaseWallet") ||
+            hasProviderFlag(provider, "isCoinbaseBrowser")
+        );
+        if (isEip1193Provider(cb)) return cb;
       }
-      if (eth?.isCoinbaseWallet || eth?.isCoinbaseBrowser) return eth;
+      if (
+        (hasProviderFlag(eth, "isCoinbaseWallet") ||
+          hasProviderFlag(eth, "isCoinbaseBrowser")) &&
+        isEip1193Provider(eth)
+      ) {
+        return eth;
+      }
       return null;
     },
   },
@@ -114,13 +176,12 @@ const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
     installUrl: "https://zerion.io/wallet",
     rdnsTargets: ["io.zerion.wallet", "zerion"],
     resolveFallbackProvider: () => {
-      if (typeof window === "undefined") return null;
-      const eth = (window as any).ethereum;
-      if (Array.isArray(eth?.providers)) {
-        const z = eth.providers.find((p: any) => p?.isZerion);
-        if (z) return z;
+      const eth = getInjectedEthereum();
+      if (eth) {
+        const zerion = getProviderList(eth).find((provider) => hasProviderFlag(provider, "isZerion"));
+        if (isEip1193Provider(zerion)) return zerion;
       }
-      if (eth?.isZerion) return eth;
+      if (hasProviderFlag(eth, "isZerion") && isEip1193Provider(eth)) return eth;
       return null;
     },
   },
@@ -131,9 +192,8 @@ const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
     installUrl: "https://brave.com/wallet/",
     rdnsTargets: ["com.brave.wallet", "brave"],
     resolveFallbackProvider: () => {
-      if (typeof window === "undefined") return null;
-      const eth = (window as any).ethereum;
-      if (eth?.isBraveWallet) return eth;
+      const eth = getInjectedEthereum();
+      if (hasProviderFlag(eth, "isBraveWallet") && isEip1193Provider(eth)) return eth;
       return null;
     },
   },
@@ -144,8 +204,8 @@ const SUGGESTED_WALLETS: SuggestedWalletOption[] = [
     installUrl: "https://ethereum.org/en/wallets/find-wallet/",
     rdnsTargets: [],
     resolveFallbackProvider: () => {
-      if (typeof window === "undefined") return null;
-      return (window as any).ethereum || null;
+      const eth = getInjectedEthereum();
+      return isEip1193Provider(eth) ? eth : null;
     },
   },
 ];
@@ -155,6 +215,7 @@ const SUPPORTED_CHAINS = [
   { id: 84532, name: "Base Sepolia" },
   { id: 1, name: "Ethereum Mainnet" },
   { id: 137, name: "Polygon Mainnet" },
+  { id: 31337, name: "Accord Local (test only)" },
 ];
 
 export function WalletStatusPill() {
@@ -163,6 +224,18 @@ export function WalletStatusPill() {
   const { disconnect } = useDisconnect();
   const chainId = useChainId();
   const { switchChain } = useSwitchChain();
+
+  const handleChainSwitch = async (targetChainId: number) => {
+    setErrorNotice(null);
+    try {
+      await switchChain?.({ chainId: targetChainId });
+    } catch (error) {
+      setErrorNotice({
+        message:
+          error instanceof Error ? error.message : "The wallet could not switch to that network.",
+      });
+    }
+  };
 
   const [mounted, setMounted] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -180,8 +253,10 @@ export function WalletStatusPill() {
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setMounted(true);
-    setActiveWalletLabel(getAccordSessionWalletName());
+    queueMicrotask(() => {
+      setMounted(true);
+      setActiveWalletLabel(getAccordSessionWalletName());
+    });
   }, []);
 
   // Discover isolated EIP-6963 wallet providers only when the user opens the Connect modal
@@ -190,19 +265,19 @@ export function WalletStatusPill() {
 
     const discovered = new Map<string, Eip6963ProviderDetail>();
 
-    const onAnnounce = (event: any) => {
-      const detail = event?.detail as Eip6963ProviderDetail | undefined;
-      if (detail?.info?.rdns && detail?.provider) {
-        discovered.set(detail.info.rdns.toLowerCase(), detail);
-        setEip6963Providers(Array.from(discovered.values()));
-      }
+    const onAnnounce = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      const detail = event.detail;
+      if (!isEip6963ProviderDetail(detail)) return;
+      discovered.set(detail.info.rdns.toLowerCase(), detail);
+      setEip6963Providers(Array.from(discovered.values()));
     };
 
-    window.addEventListener("eip6963:announceProvider", onAnnounce as EventListener);
+    window.addEventListener("eip6963:announceProvider", onAnnounce);
     window.dispatchEvent(new Event("eip6963:requestProvider"));
 
     return () => {
-      window.removeEventListener("eip6963:announceProvider", onAnnounce as EventListener);
+      window.removeEventListener("eip6963:announceProvider", onAnnounce);
     };
   }, [modalOpen]);
 
@@ -239,7 +314,7 @@ export function WalletStatusPill() {
    * Resolve the isolated provider for a specific wallet option so Zerion (or another
    * default `window.ethereum` proxy) never hijacks clicks intended for MetaMask or Phantom.
    */
-  const resolveWalletProvider = (wallet: SuggestedWalletOption): any => {
+  const resolveWalletProvider = (wallet: SuggestedWalletOption): EIP1193Provider | null => {
     // 1. Check isolated EIP-6963 announced providers first
     for (const item of eip6963Providers) {
       const rdns = item.info.rdns.toLowerCase();
@@ -249,7 +324,7 @@ export function WalletStatusPill() {
           (target) => rdns === target || rdns.includes(target) || name.includes(target)
         )
       ) {
-        return item.provider;
+        if (isEip1193Provider(item.provider)) return item.provider;
       }
     }
 
@@ -272,7 +347,7 @@ export function WalletStatusPill() {
     try {
       const provider = resolveWalletProvider(wallet);
 
-      if (!provider || typeof provider.request !== "function") {
+      if (!provider) {
         setErrorNotice({
           walletName: wallet.name,
           message: `${wallet.name} extension was not detected in this browser.`,
@@ -284,7 +359,7 @@ export function WalletStatusPill() {
 
       // Request account authorization directly from the selected wallet's isolated provider
       const accounts = await provider.request({ method: "eth_requestAccounts" });
-      if (!Array.isArray(accounts) || !accounts[0]) {
+      if (!Array.isArray(accounts) || typeof accounts[0] !== "string" || !accounts[0]) {
         throw new Error(`No account returned by ${wallet.name}.`);
       }
 
@@ -294,12 +369,16 @@ export function WalletStatusPill() {
       const targetConnector = connectors[0] || accordWalletConnector;
       await connectAsync({ connector: targetConnector });
       setModalOpen(false);
-    } catch (err: any) {
-      const rawMsg = err?.shortMessage || err?.message || "Connection request failed.";
+    } catch (err: unknown) {
+      const error = isRecord(err) ? err : {};
+      const rawMsg =
+        (typeof error.shortMessage === "string" && error.shortMessage) ||
+        (typeof error.message === "string" && error.message) ||
+        "Connection request failed.";
       const isRejected =
         rawMsg.toLowerCase().includes("rejected") ||
         rawMsg.toLowerCase().includes("denied") ||
-        err?.code === 4001;
+        error.code === 4001;
       setErrorNotice({
         walletName: wallet.name,
         message: isRejected
@@ -381,7 +460,7 @@ export function WalletStatusPill() {
                       <button
                         key={c.id}
                         type="button"
-                        onClick={() => switchChain?.({ chainId: c.id })}
+                        onClick={() => void handleChainSwitch(c.id)}
                         className={`px-2 py-1.5 rounded-[2px] border text-left truncate transition-colors ${
                           isCurrent
                             ? "bg-[#13161C] border-[#C5A46D] text-[#F4F2ED]"
@@ -393,6 +472,11 @@ export function WalletStatusPill() {
                     );
                   })}
                 </div>
+                {errorNotice && (
+                  <p role="alert" className="mt-2 text-[10px] leading-relaxed text-[#F28B8B]">
+                    {errorNotice.message}
+                  </p>
+                )}
               </div>
 
               <div className="pt-2 border-t border-white/[0.08] flex items-center justify-between">

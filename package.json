@@ -4,12 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "node -e \"require('fs').rmSync('.next/dev', { recursive: true, force: true })\" && next build --webpack",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --import tsx --test test/*.test.ts",
-    "verify:mainnet": "node --import tsx scripts/verify-mainnet-memories.ts",
-    "verify-memories": "node --import tsx scripts/verify-mainnet-memories.ts"
+    "test": "node --import tsx --test test/*.test.ts test/*.test.mjs",
+    "compile:escrow": "node scripts/compile-escrow.mjs --write",
+    "chain:local": "node scripts/start-local-chain.mjs",
+    "deploy:local": "node scripts/deploy-local-escrow.mjs"
   },
   "dependencies": {
     "@getbrevo/brevo": "^6.0.3",
@@ -41,6 +42,8 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.1",
+    "ganache": "7.9.2",
+    "solc": "0.8.30",
     "tailwindcss": "^4",
     "tsx": "^4.19.2",
     "typescript": "^5"

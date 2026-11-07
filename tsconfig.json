@@ -28,8 +28,9 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
-    "**/*.mts"
+    "**/*.mts",
+    ".next-build/types/**/*.ts",
+    ".next-build/dev/types/**/*.ts"
   ],
   "exclude": ["lib/test-*.ts", "lib/debug-*.ts", "lib/check-*.ts", "lib/list-*.ts", "node_modules"]
 }
-

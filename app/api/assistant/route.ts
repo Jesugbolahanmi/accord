@@ -1,6 +1,34 @@
 import { NextResponse } from "next/server";
 import { accordAI } from "@/lib/assistant/accord-ai";
 import { tradeService } from "@/lib/trades/store";
+import type { Trade } from "@/lib/trades/store";
+
+type AssistantTradeContext = Pick<
+  Trade,
+  | "id"
+  | "reference"
+  | "buyer"
+  | "seller"
+  | "arbiter"
+  | "buyerAccepted"
+  | "sellerAccepted"
+  | "asset"
+  | "amount"
+  | "network"
+  | "agreedTerms"
+  | "termsHash"
+  | "expirationTimestamp"
+  | "settlementMode"
+> & {
+  termsVersions: unknown[];
+  conditions: unknown[];
+  disputeEvidence: unknown[];
+  activity: unknown[];
+  status: string;
+  escrowAddress: Trade["escrowAddress"] | null;
+  verification: Trade["verification"] | null;
+  txHash?: string;
+};
 
 export async function POST(request: Request) {
   try {
@@ -14,10 +42,10 @@ export async function POST(request: Request) {
 
     // The server-side trade record is the primary source of truth.
     // Never trust client-supplied `verification` objects; any txHash is verified server-side via Tatum RPC.
-    await tradeService.seedInitialShowcaseTrades();
-    let currentTrade: any = null;
+
+    let currentTrade: Trade | AssistantTradeContext | null = null;
     if (tradeKey) {
-      currentTrade = tradeService.getTrade(tradeKey);
+      currentTrade = await tradeService.getTrade(tradeKey);
     }
 
     // If running across stateless serverless instances where a user-created trade is not in memory,
@@ -33,7 +61,7 @@ export async function POST(request: Request) {
         sellerAccepted: Boolean(clientTradeSnapshot.sellerAccepted),
         asset: String(clientTradeSnapshot.asset || "ETH"),
         amount: String(clientTradeSnapshot.amount || "0"),
-        network: String(clientTradeSnapshot.network || "base-mainnet"),
+        network: String(clientTradeSnapshot.network || "base-sepolia"),
         agreedTerms: String(clientTradeSnapshot.agreedTerms || ""),
         termsHash: String(clientTradeSnapshot.termsHash || ""),
         termsVersions: Array.isArray(clientTradeSnapshot.termsVersions)
@@ -76,9 +104,14 @@ export async function POST(request: Request) {
     });
 
     return NextResponse.json({ success: true, ...response });
-  } catch (err: any) {
+  } catch (err: unknown) {
     return NextResponse.json(
-      { success: false, error: err.message || "Assistant failed to process request" },
+      {
+        success: false,
+        error:
+          (err instanceof Error ? err.message : undefined) ||
+          "Assistant failed to process request",
+      },
       { status: 500 }
     );
   }

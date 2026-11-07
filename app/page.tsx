@@ -1,18 +1,95 @@
 import Link from "next/link";
-import { ArrowUpRight, ArrowRight, Check } from "lucide-react";
+import { ArrowUpRight, ArrowRight } from "lucide-react";
 import { tradeService } from "@/lib/trades/store";
 import { walrusMemory } from "@/lib/walrus/memory";
 
 export const dynamic = "force-dynamic";
 
-export default async function HomePage() {
-  await tradeService.seedInitialShowcaseTrades();
-  await walrusMemory.seedDemonstrationMemories();
+const faqItems = [
+  {
+    question: "What is Accord?",
+    answer:
+      "Accord helps two people make a crypto trade with clear shared terms and a record of what happened. Both sides can review the amount, network, responsibilities, and deadlines before moving forward.",
+  },
+  {
+    question: "Who holds the money?",
+    answer:
+      "Accord does not custody funds. For a new Base Sepolia ETH trade, the buyer deposits into the Accord escrow contract, and the buyer can release funds after seller fulfillment is confirmed. This is testnet-only; never use real funds.",
+  },
+  {
+    question: "How does Accord help protect a trade?",
+    answer:
+      "Participants sign trade actions with their wallets, and Base Sepolia escrow transactions are checked against the configured v2 contract and trade terms. Off-chain delivery still relies on participant evidence. This prototype is unaudited and does not guarantee a dispute outcome.",
+  },
+  {
+    question: "How do I know if payment was received?",
+    answer:
+      "For supported Base Sepolia ETH escrow trades, the buyer deposits through the trade room. Accord checks the escrow transaction, contract event, trade terms, and confirmations before updating the record. A transaction ID alone is not proof of an escrow deposit.",
+  },
+  {
+    question: "What if the other person does not complete their part?",
+    answer:
+      "You can record a disagreement and evidence in Accord. The current app does not enforce an on-chain arbitration decision. A seller can initiate a contract refund where the escrow state permits it; read the contract and trade status carefully. Outcomes are not guaranteed.",
+  },
+  {
+    question: "Can we change the terms after creating a trade?",
+    answer:
+      "Either person can propose updated terms while the trade is still eligible for changes. The update is saved as a new version, and both people must review and accept it before the trade proceeds on those terms.",
+  },
+  {
+    question: "Can I find my trade history later?",
+    answer:
+      "Yes. The Memory Box collects saved agreements, payment checks, delivery updates, dispute history, and trade outcomes. A record is only described as confirmed on Walrus when the app has verified that save; other records may be marked as pending.",
+  },
+  {
+    question: "Do I need to understand blockchain to use Accord?",
+    answer:
+      "No. Follow the steps and status messages in the trade room. Accord explains what is expected next, while showing the selected network and payment status when those details matter.",
+  },
+  {
+    question: "Is Accord live?",
+    answer:
+      "Accord is an unaudited prototype. Wallet-authorized escrow is limited to Base Sepolia ETH and is not for real funds. Mainnet escrow is not currently available.",
+  },
+];
 
-  const trades = tradeService.listTrades();
+const tradeSteps = [
+  {
+    number: "01",
+    title: "Create a trade",
+    description:
+      "Choose whether you are buying or selling, then enter the amount and the other person’s wallet address.",
+  },
+  {
+    number: "02",
+    title: "Agree on the terms",
+    description:
+      "Write down what each person will do and by when. Both people must accept the same terms before moving forward.",
+  },
+  {
+    number: "03",
+    title: "Create escrow and deposit",
+    description:
+      "For a new Base Sepolia ETH trade, the buyer creates the contract escrow and deposits the agreed test ETH. Accord verifies the event before recording the deposit. Never use real funds.",
+  },
+  {
+    number: "04",
+    title: "Complete the agreed exchange",
+    description:
+      "The person responsible for delivery completes their part. The other person reviews it and records the required confirmation. Accord does not independently verify off-network goods or services.",
+  },
+  {
+    number: "05",
+    title: "Finish and keep the record",
+    description:
+      "The seller confirms fulfillment and the buyer approves release from escrow. Accord checks the transaction and keeps a record in the trade room.",
+  },
+];
+
+export default async function HomePage() {
+  const trades = await tradeService.listTrades();
   const relayerHealth = await walrusMemory.checkRelayerHealth();
-  const specimenTrade =
-    trades.find((t) => t.reference === "ACC-2026-8812") || trades[0];
+  const latestTrade = trades[0];
 
   return (
     <div className="max-w-[1360px] mx-auto px-4 sm:px-8">
@@ -24,7 +101,7 @@ export default async function HomePage() {
             <div className="flex items-center gap-3 text-[11px] font-mono-tabular uppercase tracking-[0.14em] text-[#A6A39B]">
               <span className="text-[#C5A46D]">01</span>
               <span className="w-6 h-px bg-white/[0.15]" />
-              <span>Peer-to-Peer Crypto Settlement Infrastructure</span>
+              <span>Clear terms for crypto trades</span>
             </div>
 
             <div className="space-y-5">
@@ -36,10 +113,9 @@ export default async function HomePage() {
               </h1>
 
               <p className="text-[16px] sm:text-[17px] leading-[1.65] text-[#A6A39B] max-w-[54ch]">
-                Peer-to-peer crypto trades usually happen across scattered chat threads,
-                unverified transaction hashes, and manual guesswork. Accord binds the written
-                agreement, live on-chain verification, and persistent counterparty memory into a
-                single settlement instrument.
+                Agree on the details before you trade. Accord gives both people one place to review
+                the terms, check payment progress, record delivery, and see what needs to happen
+                next.
               </p>
             </div>
 
@@ -48,42 +124,42 @@ export default async function HomePage() {
                 href="/trades/new"
                 className="inline-flex items-center gap-2.5 px-5 py-3 rounded-[3px] bg-[#C5A46D] hover:bg-[#D6B882] text-[#090A0C] text-[13px] font-medium tracking-[-0.01em] transition-colors"
               >
-                <span>Draft a Trade Agreement</span>
+                <span>Start a trade</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </Link>
 
               <Link
-                href="/trade/ACC-2026-8812"
+                href="/trades"
                 className="inline-flex items-center gap-2 px-5 py-3 rounded-[3px] bg-[#0E1014] hover:bg-[#13161C] text-[#F4F2ED] border border-white/[0.12] text-[13px] transition-colors"
               >
-                <span>Inspect Live Room</span>
+                <span>Browse trades</span>
                 <span className="font-mono-tabular text-[11px] text-[#C5A46D]">
-                  ACC-2026-8812
+                  {trades.length} saved
                 </span>
               </Link>
             </div>
 
-            {/* Quiet Technical Ledger Strip */}
+            {/* Trade status at a glance */}
             <dl className="pt-8 border-t border-white/[0.07] grid grid-cols-3 gap-6">
               <div>
                 <dt className="text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
-                  On-Chain Truth
+                  Payment checks
                 </dt>
                 <dd className="mt-1 text-[13px] font-mono-tabular text-[#F4F2ED]">
-                  Tatum JSON-RPC
+                  Network status
                 </dd>
                 <dd className="text-[11px] text-[#6E6C65] mt-0.5">
-                  Receipt &amp; block depth proof
+                  Transaction details are checked
                 </dd>
               </div>
 
               <div>
                 <dt className="text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
-                  Memory Box Layer
+                  Saved trade records
                 </dt>
                 <dd className="mt-1 text-[13px] font-mono-tabular text-[#F4F2ED]">
                   {relayerHealth.mainnetWritesEnabled
-                    ? "Walrus Mainnet Active"
+                    ? "Online record storage"
                     : "Accord Memory Box"}
                 </dd>
                 <dd
@@ -94,142 +170,73 @@ export default async function HomePage() {
                   }`}
                 >
                   {relayerHealth.mainnetWritesEnabled
-                    ? `Mainnet Writes Ready (${relayerHealth.writesConfirmedCount} confirmed)`
+                    ? `${relayerHealth.writesConfirmedCount} records confirmed online`
                     : relayerHealth.relayerReachable
-                    ? "Relayer Reachable · Dev Mock Active (No Keys)"
-                    : "Relayer Unreachable · Local Pending Queue"}
+                    ? "Online storage needs setup"
+                    : "Saved locally · online save pending"}
                 </dd>
               </div>
 
               <div>
                 <dt className="text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
-                  Term Integrity
+                  Clear agreement history
                 </dt>
                 <dd className="mt-1 text-[13px] font-mono-tabular text-[#F4F2ED]">
-                  SHA-256 Versioned
+                  Changes are recorded
                 </dd>
                 <dd className="text-[11px] text-[#6E6C65] mt-0.5">
-                  Edits reset prior sign-off
+                  Both people review new terms
                 </dd>
               </div>
             </dl>
           </div>
 
-          {/* Right Column: Authentic Trade Agreement Specimen Sheet */}
+          {/* Right Column: Latest saved trade */}
           <div className="lg:col-span-6">
             <div className="surface-instrument rounded-[4px] overflow-hidden">
-              {/* Instrument Header Bar */}
               <div className="px-5 py-3.5 bg-[#11141B] border-b border-white/[0.08] flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
                   <span className="font-mono-tabular text-[12px] font-medium text-[#F4F2ED]">
-                    {specimenTrade?.reference || "ACC-2026-8812"}
+                    {latestTrade?.reference || "Trade activity"}
                   </span>
                   <span className="text-white/20">/</span>
                   <span className="font-mono-tabular text-[11px] text-[#A6A39B]">
-                    Base Mainnet (Chain 8453)
+                    {latestTrade ? latestTrade.network : "Live records"}
                   </span>
                 </div>
-                <span className="status-pill status-pill-brass">
-                  {specimenTrade?.status || "AwaitingDeposit"}
-                </span>
+                {latestTrade && <span className="status-pill">{latestTrade.status}</span>}
               </div>
-
-              {/* Principal Value & Counterparties */}
-              <div className="p-6 border-b border-white/[0.07] grid grid-cols-1 sm:grid-cols-12 gap-6 items-baseline">
-                <div className="sm:col-span-5">
-                  <div className="text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
-                    Settlement Principal
-                  </div>
-                  <div className="mt-1.5 font-mono-tabular text-[28px] leading-none font-medium text-[#F4F2ED] tracking-[-0.02em]">
-                    0.000371 <span className="text-[16px] text-[#A6A39B]">ETH</span>
-                  </div>
-                  <div className="mt-2 text-[11px] font-mono-tabular text-[#6E6C65]">
-                    Version 1 · Bilateral Sign-Off Complete
-                  </div>
-                </div>
-
-                <div className="sm:col-span-7 grid grid-cols-2 gap-4 pt-3 sm:pt-0 sm:border-l sm:border-white/[0.07] sm:pl-6">
+              <div className="p-6 min-h-56 flex flex-col justify-between gap-8">
+                {latestTrade ? (
+                  <>
+                    <div>
+                      <p className="text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
+                        Latest saved trade
+                      </p>
+                      <p className="mt-3 font-mono-tabular text-[28px] leading-none text-[#F4F2ED]">
+                        {latestTrade.amount}{" "}
+                        <span className="text-[16px] text-[#A6A39B]">{latestTrade.asset}</span>
+                      </p>
+                      <p className="mt-3 text-[13px] text-[#A6A39B]">
+                        Updated {new Date(latestTrade.updatedAt).toLocaleString()}
+                      </p>
+                    </div>
+                    <Link
+                      href={`/trade/${latestTrade.reference}`}
+                      className="inline-flex items-center gap-1 text-[#C5A46D] hover:text-[#D6B882] text-[12px]"
+                    >
+                      <span>Open trade record</span>
+                      <ArrowUpRight className="w-3.5 h-3.5" />
+                    </Link>
+                  </>
+                ) : (
                   <div>
-                    <div className="flex items-center justify-between text-[11px] font-mono-tabular text-[#6E6C65]">
-                      <span>BUYER</span>
-                      <span className="text-[#5CE0A8]">Signed</span>
-                    </div>
-                    <div className="mt-1 font-mono-tabular text-[12px] text-[#F4F2ED]">
-                      0xf5bdce…60b75
-                    </div>
+                    <p className="text-[16px] text-[#F4F2ED]">No trade records yet</p>
+                    <p className="mt-2 text-[13px] text-[#A6A39B]">
+                      Trades created in Accord will appear here.
+                    </p>
                   </div>
-                  <div>
-                    <div className="flex items-center justify-between text-[11px] font-mono-tabular text-[#6E6C65]">
-                      <span>SELLER</span>
-                      <span className="text-[#5CE0A8]">Signed</span>
-                    </div>
-                    <div className="mt-1 font-mono-tabular text-[12px] text-[#F4F2ED]">
-                      0x0729e2…697f7
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Agreed Terms Clause */}
-              <div className="px-6 py-4 border-b border-white/[0.07] bg-[#0A0C0F]">
-                <div className="flex items-center justify-between text-[11px] font-mono-tabular text-[#6E6C65] mb-1.5">
-                  <span>AGREED TERMS — CLAUSE V1</span>
-                  <span>
-                    SHA-256: {specimenTrade?.termsHash?.slice(0, 14) || "0x9d4e2a81c4"}…
-                  </span>
-                </div>
-                <p className="text-[13px] leading-[1.6] text-[#D8D5CE]">
-                  {specimenTrade?.agreedTerms}
-                </p>
-              </div>
-
-              {/* Conditions Matrix */}
-              <div className="divide-y divide-white/[0.06]">
-                <div className="px-6 py-3 flex items-center justify-between gap-4 text-[12px]">
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono-tabular text-[11px] text-[#6E6C65]">01</span>
-                    <span className="text-[#F4F2ED]">Base Mainnet Deposit Receipt</span>
-                  </div>
-                  <span className="font-mono-tabular text-[11px] text-[#5CE0A8]">
-                    On-Chain · Tatum RPC
-                  </span>
-                </div>
-
-                <div className="px-6 py-3 flex items-center justify-between gap-4 text-[12px]">
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono-tabular text-[11px] text-[#6E6C65]">02</span>
-                    <span className="text-[#F4F2ED]">Signed API Bundle Delivery</span>
-                  </div>
-                  <span className="font-mono-tabular text-[11px] text-[#A6A39B]">
-                    Off-Chain · SHA-256 Attestation
-                  </span>
-                </div>
-
-                <div className="px-6 py-3 flex items-center justify-between gap-4 text-[12px]">
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono-tabular text-[11px] text-[#6E6C65]">03</span>
-                    <span className="text-[#F4F2ED]">Buyer Key Validation &amp; Release Sign-Off</span>
-                  </div>
-                  <span className="font-mono-tabular text-[11px] text-[#A6A39B]">
-                    Participant Sign-Off
-                  </span>
-                </div>
-              </div>
-
-              {/* Verifiable Base Mainnet Transaction Footer */}
-              <div className="px-6 py-3.5 bg-[#11141B] border-t border-white/[0.08] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] font-mono-tabular">
-                <div className="text-[#A6A39B] truncate">
-                  Verifiable Base Tx:{" "}
-                  <span className="text-[#F4F2ED]">0x5e628c371187d00fc4be94…87b6c</span> (Block
-                  #53221342)
-                </div>
-                <Link
-                  href="/trade/ACC-2026-8812"
-                  className="inline-flex items-center gap-1 text-[#C5A46D] hover:text-[#D6B882] shrink-0"
-                >
-                  <span>Open Room &amp; Verify</span>
-                  <ArrowUpRight className="w-3.5 h-3.5" />
-                </Link>
+                )}
               </div>
             </div>
           </div>
@@ -243,15 +250,15 @@ export default async function HomePage() {
             <div className="flex items-center gap-3 text-[11px] font-mono-tabular uppercase tracking-[0.14em] text-[#A6A39B]">
               <span className="text-[#C5A46D]">02</span>
               <span className="w-6 h-px bg-white/[0.15]" />
-              <span>Operational Architecture</span>
+              <span>How Accord helps</span>
             </div>
             <h2 className="font-editorial text-[30px] sm:text-[36px] leading-[1.12] tracking-[-0.02em] text-[#F4F2ED]">
-              Designed around what can be proved, and honest about what cannot.
+              See the agreed terms, payment progress, and next step in one place.
             </h2>
             <p className="text-[14px] leading-[1.7] text-[#A6A39B]">
-              A serious settlement tool never pretends a button click equals a blockchain
-              confirmation, and never claims a smart contract can independently see an off-chain
-              delivery. Accord separates every step by its exact evidentiary standard.
+              Accord keeps trade details and updates together. It checks crypto payments against
+              the selected network, while delivery of goods or services is confirmed by the people
+              involved.
             </p>
           </div>
 
@@ -262,13 +269,11 @@ export default async function HomePage() {
               </div>
               <div className="sm:col-span-9 space-y-2">
                 <h3 className="text-[16px] font-medium text-[#F4F2ED] tracking-[-0.01em]">
-                  Versioned terms that cannot be silently overwritten
+                  Shared terms everyone can review
                 </h3>
                 <p className="text-[14px] leading-[1.65] text-[#A6A39B]">
-                  When a participant proposes a change to the trade terms, Accord increments the
-                  version number, computes a new SHA-256 digest, preserves the prior wording in the
-                  audit trail, and resets counterparty acceptance until the new version is reviewed
-                  and signed.
+                  If someone suggests a change, Accord keeps the earlier version and asks both
+                  people to review and accept the updated terms before proceeding.
                 </p>
               </div>
             </div>
@@ -279,13 +284,12 @@ export default async function HomePage() {
               </div>
               <div className="sm:col-span-9 space-y-2">
                 <h3 className="text-[16px] font-medium text-[#F4F2ED] tracking-[-0.01em]">
-                  Server-side Tatum RPC receipt verification
+                  Check payment before marking it received
                 </h3>
                 <p className="text-[14px] leading-[1.65] text-[#A6A39B]">
-                  A trade room can never be marked funded by a UI toggle alone. Accord queries the
-                  Tatum JSON-RPC Gateway (<code className="font-mono-tabular text-[12px] text-[#F4F2ED]">eth_getTransactionReceipt</code>,{" "}
-                  <code className="font-mono-tabular text-[12px] text-[#F4F2ED]">eth_getTransactionByHash</code>, and{" "}
-                  <code className="font-mono-tabular text-[12px] text-[#F4F2ED]">eth_blockNumber</code>) to verify execution status (<code className="font-mono-tabular text-[12px] text-[#5CE0A8]">0x1</code>), block confirmation depth, sender, recipient, and exact wei transferred.
+                  A transaction ID alone does not confirm a payment. Accord checks the payment on
+                  the selected network and compares it with the trade details before showing it as
+                  confirmed.
                 </p>
               </div>
             </div>
@@ -296,13 +300,13 @@ export default async function HomePage() {
               </div>
               <div className="sm:col-span-9 space-y-2">
                 <h3 className="text-[16px] font-medium text-[#F4F2ED] tracking-[-0.01em]">
-                  Explicit separation of on-chain proofs and off-chain attestations
+                  Payment checks and delivery confirmations are different
                 </h3>
                 <p className="text-[14px] leading-[1.65] text-[#A6A39B]">
-                  On-chain deposit conditions unlock only when Tatum RPC confirms a mined receipt.
-                  Off-chain deliverables (such as API credentials, domain handovers, or physical
-                  shipments) require signed participant attestations with SHA-256 evidence hashes
-                  and neutral third-party arbitration (<code className="font-mono-tabular text-[12px] text-[#F4F2ED]">arbiter != buyer &amp;&amp; arbiter != seller</code>) if disputed.
+                  Accord can check a crypto payment on its network. The people trading must confirm
+                  delivery of anything outside the network, such as a service or physical item.
+                  Accord records what each person reports; it cannot independently inspect those
+                  items.
                 </p>
               </div>
             </div>
@@ -313,10 +317,12 @@ export default async function HomePage() {
               </div>
               <div className="sm:col-span-9 space-y-2">
                 <h3 className="text-[16px] font-medium text-[#F4F2ED] tracking-[-0.01em]">
-                  Persistent counterparty context via Walrus Memory
+                  Keep a record of the trade
                 </h3>
                 <p className="text-[14px] leading-[1.65] text-[#A6A39B]">
-                  Accord integrates <code className="font-mono-tabular text-[12px] text-[#F4F2ED]">@mysten-incubation/memwal</code> to store and recall agreed terms, verified transaction outcomes, dispute rulings, and explicit user safety preferences across sessions—answering practical settlement questions without ever allowing AI to authorize releases or decide disputes.
+                  Important details—agreements, payment checks, delivery updates, and outcomes—can
+                  be found later in the Memory Box. Records are clearly marked when an online save
+                  has not yet been confirmed.
                 </p>
               </div>
             </div>
@@ -324,14 +330,90 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* 03 / LIVE AGREEMENTS REGISTER */}
+      {/* 03 / TRADE GUIDE */}
+      <section id="how-it-works" className="py-20 lg:py-24 border-t border-white/[0.07]">
+        <div className="max-w-3xl space-y-3 pb-10">
+          <div className="flex items-center gap-3 text-[11px] font-mono-tabular uppercase tracking-[0.14em] text-[#A6A39B]">
+            <span className="text-[#C5A46D]">03</span>
+            <span className="w-6 h-px bg-white/[0.15]" />
+            <span>How to use Accord</span>
+          </div>
+          <h2 className="font-editorial text-[32px] sm:text-[40px] leading-[1.1] tracking-[-0.02em] text-[#F4F2ED]">
+            Your first trade, made simple.
+          </h2>
+          <p className="text-[14px] sm:text-[15px] leading-[1.7] text-[#A6A39B]">
+            From agreeing on the terms to completing the trade, here’s how Accord works.
+          </p>
+        </div>
+
+        <ol className="grid grid-cols-1 md:grid-cols-5 border-t border-white/[0.1]">
+          {tradeSteps.map((step) => (
+            <li
+              key={step.number}
+              className="py-6 md:py-5 md:pr-5 md:pl-4 md:first:pl-0 border-b md:border-b-0 md:border-r border-white/[0.1] last:border-r-0"
+            >
+              <span className="font-mono-tabular text-[11px] text-[#C5A46D]">
+                STEP {step.number}
+              </span>
+              <h3 className="mt-3 text-[16px] font-medium text-[#F4F2ED]">{step.title}</h3>
+              <p className="mt-2 text-[13px] leading-[1.7] text-[#A6A39B]">
+                {step.description}
+              </p>
+            </li>
+          ))}
+        </ol>
+        <p className="mt-5 max-w-3xl text-[12px] leading-[1.7] text-[#6E6C65]">
+          Base Sepolia ETH trades can use wallet-authorized v2 escrow. This prototype is unaudited,
+          testnet-only, and must not be used to coordinate a real-money trade.
+        </p>
+      </section>
+
+      {/* 04 / FREQUENTLY ASKED QUESTIONS */}
+      <section id="faq" className="py-20 lg:py-24 border-t border-white/[0.07]">
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-10 lg:gap-16">
+          <div className="lg:col-span-2 space-y-3">
+            <div className="flex items-center gap-3 text-[11px] font-mono-tabular uppercase tracking-[0.14em] text-[#A6A39B]">
+              <span className="text-[#C5A46D]">04</span>
+              <span className="w-6 h-px bg-white/[0.15]" />
+              <span>Good to know</span>
+            </div>
+            <h2 className="font-editorial text-[32px] sm:text-[40px] leading-[1.1] tracking-[-0.02em] text-[#F4F2ED]">
+              Questions people ask first.
+            </h2>
+            <p className="text-[14px] leading-[1.7] text-[#A6A39B]">
+              Straight answers about payments, trade terms, and what Accord can—and cannot—do.
+            </p>
+          </div>
+
+          <div className="lg:col-span-3 border-t border-white/[0.1]">
+            {faqItems.map((item) => (
+              <details key={item.question} className="group border-b border-white/[0.1]">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-6 py-5 text-left text-[15px] sm:text-[16px] font-medium text-[#F4F2ED] [&::-webkit-details-marker]:hidden">
+                  <span>{item.question}</span>
+                  <span
+                    aria-hidden="true"
+                    className="font-mono-tabular text-[22px] font-normal text-[#C5A46D] transition-transform duration-200 group-open:rotate-45"
+                  >
+                    +
+                  </span>
+                </summary>
+                <p className="max-w-[68ch] pb-5 pr-8 text-[13px] sm:text-[14px] leading-[1.75] text-[#A6A39B]">
+                  {item.answer}
+                </p>
+              </details>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* 05 / LIVE AGREEMENTS REGISTER */}
       <section className="py-20">
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-6 border-b border-white/[0.1]">
           <div>
             <div className="flex items-center gap-3 text-[11px] font-mono-tabular uppercase tracking-[0.14em] text-[#A6A39B] mb-2">
-              <span className="text-[#C5A46D]">03</span>
+              <span className="text-[#C5A46D]">05</span>
               <span className="w-6 h-px bg-white/[0.15]" />
-              <span>Active Settlement Register</span>
+              <span>Trade list</span>
             </div>
             <h2 className="font-editorial text-[28px] sm:text-[32px] leading-tight text-[#F4F2ED]">
               Open Trade Agreements

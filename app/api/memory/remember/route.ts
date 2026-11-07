@@ -27,7 +27,10 @@ export async function POST(request: Request) {
     const overview = walrusMemory.getOverviewStats();
 
     return NextResponse.json({ success: true, memory, overview }, { status: 201 });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 500 }
+    );
   }
 }

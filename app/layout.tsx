@@ -28,9 +28,9 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Accord — Trade on agreed terms",
+  title: "Accord — Clear terms for crypto trades",
   description:
-    "Institutional-grade peer-to-peer crypto agreements with versioned terms, Tatum RPC on-chain verification, and persistent Walrus Memory on Mainnet.",
+    "Agree on crypto trade terms, check payment progress, record delivery, and keep a shared history of what happened.",
 };
 
 function NavigationHeader() {
@@ -58,31 +58,43 @@ function NavigationHeader() {
               href="/trades"
               className="px-3 py-1.5 rounded-[3px] hover:text-[#F4F2ED] hover:bg-white/[0.03] transition-colors"
             >
-              Agreements
+              Trades
             </Link>
             <Link
               href="/trades/new"
               className="px-3 py-1.5 rounded-[3px] hover:text-[#F4F2ED] hover:bg-white/[0.03] transition-colors"
             >
-              Draft Trade
+              Start a trade
             </Link>
             <Link
-              href="/trade/ACC-2026-8812"
+              href="/setup/base-sepolia"
               className="px-3 py-1.5 rounded-[3px] hover:text-[#F4F2ED] hover:bg-white/[0.03] transition-colors"
             >
-              Specimen Room
+              Base Sepolia testnet setup
             </Link>
             <Link
               href="/memory"
               className="px-3 py-1.5 rounded-[3px] hover:text-[#F4F2ED] hover:bg-white/[0.03] transition-colors"
             >
-              Memory Box
+              Saved records
             </Link>
             <Link
               href="/tatum-diagnostic"
               className="px-3 py-1.5 rounded-[3px] hover:text-[#F4F2ED] hover:bg-white/[0.03] transition-colors"
             >
-              RPC Telemetry
+              System status
+            </Link>
+            <Link
+              href="/#how-it-works"
+              className="px-3 py-1.5 rounded-[3px] hover:text-[#F4F2ED] hover:bg-white/[0.03] transition-colors"
+            >
+              How it works
+            </Link>
+            <Link
+              href="/#faq"
+              className="px-3 py-1.5 rounded-[3px] hover:text-[#F4F2ED] hover:bg-white/[0.03] transition-colors"
+            >
+              FAQ
             </Link>
           </nav>
         </div>
@@ -104,25 +116,31 @@ function NavigationHeader() {
         className="md:hidden flex items-center justify-between px-4 py-2 border-t border-white/[0.06] bg-[#0B0D10] text-[12px] font-mono-tabular text-[#A6A39B] overflow-x-auto"
       >
         <Link href="/trades" className="px-2 py-0.5 hover:text-[#F4F2ED] whitespace-nowrap">
-          Agreements
+          Trades
         </Link>
         <Link href="/trades/new" className="px-2 py-0.5 hover:text-[#F4F2ED] whitespace-nowrap">
-          Draft Trade
+          Start trade
         </Link>
         <Link
-          href="/trade/ACC-2026-8812"
+          href="/setup/base-sepolia"
           className="px-2 py-0.5 hover:text-[#F4F2ED] whitespace-nowrap"
         >
-          Room ACC-8812
+          Base Sepolia testnet setup
         </Link>
         <Link href="/memory" className="px-2 py-0.5 hover:text-[#F4F2ED] whitespace-nowrap">
-          Memory
+          Saved records
         </Link>
         <Link
           href="/tatum-diagnostic"
           className="px-2 py-0.5 hover:text-[#F4F2ED] whitespace-nowrap"
         >
-          Tatum RPC
+          Status
+        </Link>
+        <Link href="/#how-it-works" className="px-2 py-0.5 hover:text-[#F4F2ED] whitespace-nowrap">
+          How it works
+        </Link>
+        <Link href="/#faq" className="px-2 py-0.5 hover:text-[#F4F2ED] whitespace-nowrap">
+          FAQ
         </Link>
       </nav>
     </header>
@@ -135,18 +153,18 @@ function InstitutionalFooter() {
       <div className="max-w-[1360px] mx-auto px-4 sm:px-8 py-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-[12px] text-[#6E6C65]">
         <div className="flex items-center gap-3">
           <AccordMark className="w-5 h-5" />
-          <span className="text-[#A6A39B] font-medium">Accord Settlement Infrastructure</span>
-          <span className="font-mono-tabular">— On-chain verification via Tatum RPC · Persistent context via Walrus Memory</span>
+          <span className="text-[#A6A39B] font-medium">Accord · Trade on agreed terms</span>
+          <span className="font-mono-tabular">Clear terms, checked payments, and a shared trade history.</span>
         </div>
         <div className="flex items-center gap-5 font-mono-tabular text-[11px]">
           <Link href="/trades" className="hover:text-[#F4F2ED] transition-colors">
-            Agreements
+            Trades
           </Link>
           <Link href="/memory" className="hover:text-[#F4F2ED] transition-colors">
-            Walrus Relayer
+            Saved records
           </Link>
           <Link href="/tatum-diagnostic" className="hover:text-[#F4F2ED] transition-colors">
-            Tatum Gateway
+            System status
           </Link>
         </div>
       </div>

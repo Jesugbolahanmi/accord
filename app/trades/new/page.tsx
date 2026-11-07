@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { useAccount } from "wagmi";
+import { useAccount, useSignTypedData, useSwitchChain } from "wagmi";
 import {
   ArrowRight,
   ArrowLeft,
@@ -13,6 +13,17 @@ import {
   Check,
   AlertCircle,
 } from "lucide-react";
+import type { WalrusTradeMemory } from "@/lib/walrus/memory";
+import type { Trade } from "@/lib/trades/store";
+import {
+  createTradeActionTypedData,
+  getTradeActionChainId,
+} from "@/lib/trades/action-auth";
+import {
+  EVM_ESCROW_NETWORKS,
+  getEvmEscrowNetwork,
+  isMainnetEscrowPubliclyEnabled,
+} from "@/lib/contracts/escrow-networks";
 
 interface ConditionDraft {
   title: string;
@@ -20,39 +31,62 @@ interface ConditionDraft {
   type: "onchain_receipt" | "external_delivery" | "inspection" | "mutual_signature";
 }
 
+interface RecallResponse {
+  success?: boolean;
+  memories?: WalrusTradeMemory[];
+}
+
+interface CreateTradeResponse {
+  success?: boolean;
+  error?: string;
+  trade?: Trade;
+}
+
+interface RecallState {
+  counterparty: string;
+  memories: WalrusTradeMemory[];
+  loading: boolean;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "An unexpected error occurred.";
+}
+
 const ETH_ADDR_RE = /^0x[a-fA-F0-9]{40}$/;
 
 export default function CreateTradePage() {
   const router = useRouter();
   const { address: connectedAddress } = useAccount();
+  const { signTypedDataAsync } = useSignTypedData();
+  const { switchChainAsync } = useSwitchChain();
 
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [creatorRole, setCreatorRole] = useState<"buyer" | "seller">("buyer");
-  const [buyer, setBuyer] = useState("0xf5bdce6674389d937df8ad3363c10fc3fa060b75");
-  const [seller, setSeller] = useState("0x0729e2a4716d9f7dd17858d5d504426d228697f7");
-  const [arbiter, setArbiter] = useState("0x12c4E5496F5bAbE7F9159958742D2635B1a084c7");
+  const [buyer, setBuyer] = useState("");
+  const [seller, setSeller] = useState("");
+  const [arbiter, setArbiter] = useState("");
   const [asset, setAsset] = useState("ETH");
-  const [amount, setAmount] = useState("0.25");
-  const [network, setNetwork] = useState("base-mainnet");
+  const [amount, setAmount] = useState("");
+  const [network, setNetwork] = useState("base-sepolia");
   const [expirationHours, setExpirationHours] = useState(72);
   const [agreedTerms, setAgreedTerms] = useState(
-    "Buyer transfers agreed ETH on Base Mainnet (verified via Tatum RPC with status 0x1). Seller delivers the signed deliverable package and SHA-256 checksum within 2 hours of confirmation. Buyer inspects and authorizes settlement release."
+    "The buyer sends the agreed amount using the payment arrangement shown in the trade room. Accord checks the submitted transaction on the selected network. The seller completes the agreed delivery by the deadline, and the buyer reviews and confirms it."
   );
 
   const [conditions, setConditions] = useState<ConditionDraft[]>([
     {
-      title: "On-Chain Deposit Receipt (Tatum RPC)",
-      description: "Verify buyer deposit transaction receipt with status 0x1 on the selected network.",
+      title: "Payment confirmed",
+      description: "Accord checks the submitted payment transaction against the selected network.",
       type: "onchain_receipt",
     },
     {
-      title: "Counterparty Deliverable Handover",
-      description: "Seller delivers agreed digital/off-chain asset and anchors SHA-256 receipt hash.",
+      title: "Delivery completed",
+      description: "The seller completes the delivery described in the agreed terms.",
       type: "external_delivery",
     },
     {
-      title: "Buyer Verification & Sign-Off",
-      description: "Buyer inspects deliverable and attests completion before releasing funds.",
+      title: "Buyer confirms delivery",
+      description: "The buyer reviews the delivery and records whether the agreed work is complete.",
       type: "inspection",
     },
   ]);
@@ -61,76 +95,95 @@ export default function CreateTradePage() {
   const [newCondDesc, setNewCondDesc] = useState("");
   const [newCondType, setNewCondType] = useState<ConditionDraft["type"]>("external_delivery");
 
-  const [recalledMemories, setRecalledMemories] = useState<any[]>([]);
-  const [loadingRecall, setLoadingRecall] = useState(false);
+  const [recallState, setRecallState] = useState<RecallState>({
+    counterparty: "",
+    memories: [],
+    loading: false,
+  });
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [createdTrade, setCreatedTrade] = useState<any | null>(null);
+  const [createdTrade, setCreatedTrade] = useState<Trade | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
 
   useEffect(() => {
-    if (connectedAddress) {
+    if (!connectedAddress) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
       if (creatorRole === "buyer") {
         setBuyer(connectedAddress);
       } else {
         setSeller(connectedAddress);
       }
-    }
+    });
+    return () => {
+      active = false;
+    };
   }, [connectedAddress, creatorRole]);
 
   const counterpartyAddress = creatorRole === "buyer" ? seller : buyer;
+  const recallIsCurrent = recallState.counterparty === counterpartyAddress;
+  const recalledMemories = recallIsCurrent ? recallState.memories : [];
+  const loadingRecall =
+    recallIsCurrent && recallState.loading;
 
   useEffect(() => {
-    if (!counterpartyAddress || counterpartyAddress.length < 10) {
-      setRecalledMemories([]);
-      return;
-    }
+    if (!counterpartyAddress || counterpartyAddress.length < 10) return;
 
-    const timer = setTimeout(async () => {
-      setLoadingRecall(true);
-      try {
-        const res = await fetch(
-          `/api/memory/recall?q=*&participant=${encodeURIComponent(counterpartyAddress)}&limit=4`
-        );
-        const data = await res.json();
-        if (data.success && Array.isArray(data.memories)) {
-          setRecalledMemories(data.memories);
+    let active = true;
+    const timer = setTimeout(() => {
+      setRecallState({ counterparty: counterpartyAddress, memories: [], loading: true });
+      void (async () => {
+        let memories: WalrusTradeMemory[] = [];
+        try {
+          const res = await fetch(
+            `/api/memory/recall?q=*&participant=${encodeURIComponent(counterpartyAddress)}&limit=4`
+          );
+          const data = (await res.json()) as RecallResponse;
+          if (data.success && Array.isArray(data.memories)) {
+            memories = data.memories;
+          }
+        } catch {
+          // ignore
+        } finally {
+          if (active) {
+            setRecallState({ counterparty: counterpartyAddress, memories, loading: false });
+          }
         }
-      } catch {
-        // ignore
-      } finally {
-        setLoadingRecall(false);
-      }
+      })();
     }, 300);
 
-    return () => clearTimeout(timer);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [counterpartyAddress]);
 
   // Contextual validation for Step 1
   const validateStep1 = (): string | null => {
     if (!amount.trim() || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
-      return "Enter a valid positive settlement amount.";
+      return "Enter an amount greater than zero.";
     }
     if (!ETH_ADDR_RE.test(buyer.trim())) {
-      return "Buyer address must be a valid 42-character hexadecimal address (0x…).";
+      return "Enter a valid wallet address for the buyer.";
     }
     if (!ETH_ADDR_RE.test(seller.trim())) {
-      return "Seller address must be a valid 42-character hexadecimal address (0x…).";
+      return "Enter a valid wallet address for the seller.";
     }
     if (buyer.trim().toLowerCase() === seller.trim().toLowerCase()) {
       return "Buyer and Seller must be distinct wallet addresses.";
     }
     if (arbiter.trim()) {
       if (!ETH_ADDR_RE.test(arbiter.trim())) {
-        return "Neutral Arbiter must be a valid 42-character hexadecimal address (0x…).";
+        return "Enter a valid wallet address for the independent dispute resolver.";
       }
       const arbLower = arbiter.trim().toLowerCase();
       if (
         arbLower === buyer.trim().toLowerCase() ||
         arbLower === seller.trim().toLowerCase()
       ) {
-        return "Neutral Arbiter must be independent and cannot match the Buyer or Seller address.";
+        return "The dispute resolver must be different from the buyer and seller.";
       }
     }
     return null;
@@ -138,10 +191,10 @@ export default function CreateTradePage() {
 
   const validateStep2 = (): string | null => {
     if (!agreedTerms.trim() || agreedTerms.trim().length < 15) {
-      return "Please provide clear, specific trade terms (at least 15 characters).";
+      return "Describe the trade clearly (at least 15 characters).";
     }
     if (conditions.length === 0) {
-      return "Include at least one settlement condition.";
+      return "Add at least one requirement for completing the trade.";
     }
     return null;
   };
@@ -176,8 +229,8 @@ export default function CreateTradePage() {
         description:
           newCondDesc.trim() ||
           (newCondType === "onchain_receipt"
-            ? "Verified on-chain via Tatum RPC receipt"
-            : "Participant attestation anchored to Walrus Memory"),
+            ? "Accord checks the payment on the selected network."
+            : "The people in the trade confirm this requirement."),
         type: newCondType,
       },
     ]);
@@ -209,32 +262,69 @@ export default function CreateTradePage() {
     setSubmitting(true);
     try {
       const creator = creatorRole === "buyer" ? buyer : seller;
+      if (!connectedAddress || connectedAddress.toLowerCase() !== creator.toLowerCase()) {
+        throw new Error("Connect the buyer or seller wallet that is creating this agreement.");
+      }
+      const networkConfig = getEvmEscrowNetwork(network);
+      if (!networkConfig || (!networkConfig.testnet && !isMainnetEscrowPubliclyEnabled())) {
+        throw new Error("This network is not enabled for escrow agreements.");
+      }
+      const chainId = getTradeActionChainId(network);
+      if (!chainId) throw new Error("This network cannot be used for a signed agreement.");
+      await switchChainAsync({ chainId: networkConfig.chainId });
+
+      const authorizationNonce = window.crypto.randomUUID();
+      const issuedAt = BigInt(Math.floor(Date.now() / 1000));
+      const expiresAt = issuedAt + BigInt(300);
+      const signedPayload = {
+        action: "create_trade",
+        authorizationNonce,
+        creator,
+        creatorRole,
+        buyer,
+        seller,
+        arbiter,
+        asset,
+        amount,
+        network,
+        agreedTerms,
+        conditions,
+        expirationHours,
+      };
+      const signature = await signTypedDataAsync(
+        createTradeActionTypedData({
+          origin: window.location.origin,
+          tradeReference: `create:${authorizationNonce}`,
+          payload: signedPayload,
+          expectedUpdatedAt: BigInt(0),
+          issuedAt,
+          expiresAt,
+          chainId,
+        })
+      );
+
       const res = await fetch("/api/trades", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          creator,
-          creatorRole,
-          buyer,
-          seller,
-          arbiter,
-          asset,
-          amount,
-          network,
-          agreedTerms,
-          conditions,
-          expirationHours,
+          ...signedPayload,
+          authorization: {
+            signature,
+            issuedAt: issuedAt.toString(),
+            expiresAt: expiresAt.toString(),
+            expectedUpdatedAt: "0",
+          },
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      const data = (await res.json()) as CreateTradeResponse;
+      if (!res.ok || !data.success || !data.trade) {
         throw new Error(data.error || "Failed to initialize agreement");
       }
 
       setCreatedTrade(data.trade);
-    } catch (err: any) {
-      setErrorMsg(err.message);
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -268,23 +358,19 @@ export default function CreateTradePage() {
           <div className="p-6 sm:p-8 space-y-6">
             <div className="space-y-2">
               <h1 className="font-editorial text-[30px] sm:text-[36px] leading-tight text-[#F4F2ED]">
-                Counterparty invitation ready.
+                Your trade is ready to share.
               </h1>
               <p className="text-[14px] text-[#A6A39B] leading-relaxed">
-                Version 1 of the agreement (SHA-256:{" "}
-                <code className="font-mono-tabular text-[12px] text-[#F4F2ED]">
-                  {createdTrade.termsHash?.slice(0, 18)}…
-                </code>
-                ) has been recorded. Send the invitation link below to the counterparty so they can
-                review and sign the terms before any deposit is made.
+                The first version of your terms has been saved. Send this link to the other person
+                so they can review and accept the terms before anyone sends payment.
               </p>
             </div>
 
             {/* Shareable Invitation URL */}
             <div className="p-4 bg-[#090A0C] border border-white/[0.12] rounded-[3px] space-y-2">
               <div className="flex items-center justify-between text-[11px] font-mono-tabular text-[#6E6C65]">
-                <span>COUNTERPARTY INVITATION URL</span>
-                <span>Requires counterparty signature</span>
+                <span>TRADE INVITATION LINK</span>
+                <span>The other person needs to accept the terms</span>
               </div>
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
                 <input
@@ -316,7 +402,7 @@ export default function CreateTradePage() {
             {/* Summary Ledger */}
             <dl className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-white/[0.08] font-mono-tabular text-[12px]">
               <div>
-                <dt className="text-[11px] text-[#6E6C65] uppercase">Principal</dt>
+                <dt className="text-[11px] text-[#6E6C65] uppercase">Amount</dt>
                 <dd className="text-[#F4F2ED] mt-1 font-medium">
                   {createdTrade.amount} {createdTrade.asset}
                 </dd>
@@ -326,13 +412,11 @@ export default function CreateTradePage() {
                 <dd className="text-[#F4F2ED] mt-1">{createdTrade.network}</dd>
               </div>
               <div>
-                <dt className="text-[11px] text-[#6E6C65] uppercase">Conditions</dt>
-                <dd className="text-[#F4F2ED] mt-1">
-                  {createdTrade.conditions.length} Clauses
-                </dd>
+                <dt className="text-[11px] text-[#6E6C65] uppercase">Requirements</dt>
+                <dd className="text-[#F4F2ED] mt-1">{createdTrade.conditions.length}</dd>
               </div>
               <div>
-                <dt className="text-[11px] text-[#6E6C65] uppercase">Initiator Role</dt>
+                <dt className="text-[11px] text-[#6E6C65] uppercase">You are the</dt>
                 <dd className="text-[#C5A46D] mt-1 uppercase">{createdTrade.creatorRole}</dd>
               </div>
             </dl>
@@ -342,14 +426,14 @@ export default function CreateTradePage() {
                 href="/trades"
                 className="w-full sm:w-auto px-4 py-2.5 rounded-[3px] border border-white/[0.1] text-[12px] font-mono-tabular text-[#A6A39B] hover:text-[#F4F2ED] text-center"
               >
-                Return to Register
+                Back to trades
               </Link>
               <button
                 type="button"
                 onClick={() => router.push(`/trade/${createdTrade.reference}`)}
                 className="w-full sm:w-auto px-5 py-2.5 rounded-[3px] bg-[#C5A46D] hover:bg-[#D6B882] text-[#090A0C] text-[12px] font-medium inline-flex items-center justify-center gap-2 transition-colors"
               >
-                <span>Open Shared Trade Room</span>
+                <span>Open trade room</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>
@@ -365,14 +449,14 @@ export default function CreateTradePage() {
       <div className="pb-8 border-b border-white/[0.08] flex flex-col lg:flex-row lg:items-end justify-between gap-6">
         <div className="space-y-2">
           <div className="text-[11px] font-mono-tabular uppercase tracking-[0.14em] text-[#6E6C65]">
-            Agreement Drafting Workflow
+            Start a trade
           </div>
           <h1 className="font-editorial text-[34px] sm:text-[42px] leading-[1.08] tracking-[-0.02em] text-[#F4F2ED]">
-            Draft a Peer-to-Peer Agreement
+            Set up a trade
           </h1>
           <p className="text-[14px] text-[#A6A39B] max-w-[60ch]">
-            Specify the settlement principal, designate both counterparties and an independent
-            neutral arbiter, and define verifiable settlement clauses.
+            Add the people, amount, network, and responsibilities. Then share the trade so the
+            other person can review the terms.
           </p>
         </div>
 
@@ -380,8 +464,8 @@ export default function CreateTradePage() {
         <div className="grid grid-cols-3 gap-2 sm:gap-3 font-mono-tabular text-[11px] shrink-0">
           {[
             { num: 1 as const, label: "Counterparties & Asset" },
-            { num: 2 as const, label: "Terms & Conditions" },
-            { num: 3 as const, label: "Review & Issue" },
+            { num: 2 as const, label: "Agree on details" },
+            { num: 3 as const, label: "Review & share" },
           ].map((s) => {
             const active = step === s.num;
             const passed = step > s.num;
@@ -426,14 +510,14 @@ export default function CreateTradePage() {
                   Stage 01 of 03
                 </div>
                 <h2 className="text-[18px] font-medium text-[#F4F2ED] mt-1">
-                  Participant Role, Asset &amp; Counterparty Addresses
+                  People and payment details
                 </h2>
               </div>
 
               {/* Initiator Role */}
               <div className="space-y-2">
                 <label className="block text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#A6A39B]">
-                  Your Role in This Agreement
+                  Your role in this trade
                 </label>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <button
@@ -446,10 +530,10 @@ export default function CreateTradePage() {
                     }`}
                   >
                     <div className="font-mono-tabular text-[12px] text-[#C5A46D]">
-                      BUYER (DEPOSITOR)
+                      BUYER (PAYS)
                     </div>
                     <div className="text-[12px] text-[#A6A39B] mt-1">
-                      Deposits the crypto principal and authorizes release once conditions are met.
+                      Sends payment using the arrangement shown in the trade room.
                     </div>
                   </button>
 
@@ -463,10 +547,10 @@ export default function CreateTradePage() {
                     }`}
                   >
                     <div className="font-mono-tabular text-[12px] text-[#C5A46D]">
-                      SELLER (RECIPIENT)
+                      SELLER (RECEIVES PAYMENT)
                     </div>
                     <div className="text-[12px] text-[#A6A39B] mt-1">
-                      Fulfills the agreed deliverables and receives settlement upon release.
+                      Completes the delivery described in the agreed terms.
                     </div>
                   </button>
                 </div>
@@ -476,13 +560,14 @@ export default function CreateTradePage() {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#A6A39B] mb-1.5">
-                    Principal Amount
+                    Trade amount
                   </label>
                   <input
                     type="text"
                     required
                     value={amount}
                     onChange={(e) => setAmount(e.target.value)}
+                    placeholder="Enter amount"
                     className="w-full px-3.5 py-2.5 rounded-[3px] bg-[#090A0C] border border-white/[0.12] font-mono-tabular text-[14px] text-[#F4F2ED]"
                   />
                 </div>
@@ -497,26 +582,34 @@ export default function CreateTradePage() {
                     className="w-full px-3.5 py-2.5 rounded-[3px] bg-[#090A0C] border border-white/[0.12] font-mono-tabular text-[13px] text-[#F4F2ED]"
                   >
                     <option value="ETH">ETH (Native)</option>
-                    <option value="USDC">USDC</option>
-                    <option value="POL">POL (Polygon)</option>
-                    <option value="WBTC">WBTC</option>
                   </select>
+                  <p className="mt-1 text-[10px] leading-relaxed text-[#6E6C65]">
+                    Only native ETH escrow is supported. Mainnet availability is controlled by the
+                    deployment operator and remains off by default.
+                  </p>
                 </div>
 
                 <div>
                   <label className="block text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#A6A39B] mb-1.5">
-                    Settlement Network
+                    Payment network
                   </label>
                   <select
                     value={network}
                     onChange={(e) => setNetwork(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-[3px] bg-[#090A0C] border border-white/[0.12] font-mono-tabular text-[13px] text-[#F4F2ED]"
                   >
-                    <option value="base-mainnet">Base Mainnet (8453)</option>
-                    <option value="base-sepolia">Base Sepolia (84532)</option>
-                    <option value="ethereum-mainnet">Ethereum Mainnet (1)</option>
-                    <option value="polygon-mainnet">Polygon Mainnet (137)</option>
+                    {Object.entries(EVM_ESCROW_NETWORKS)
+                      .filter(([, config]) => config.testnet || isMainnetEscrowPubliclyEnabled())
+                      .map(([networkId, config]) => (
+                        <option key={networkId} value={networkId}>
+                          {config.name} ({config.chainId})
+                        </option>
+                      ))}
                   </select>
+                  <p className="mt-1 text-[10px] leading-relaxed text-[#6E6C65]">
+                    Mainnet networks appear only when explicitly enabled in the public deployment
+                    configuration. Server-side escrow remains independently gated.
+                  </p>
                 </div>
               </div>
 
@@ -524,7 +617,7 @@ export default function CreateTradePage() {
               <div className="space-y-4 pt-2 border-t border-white/[0.07]">
                 <div>
                   <label className="block text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#A6A39B] mb-1.5">
-                    Buyer Wallet Address {creatorRole === "buyer" && "(Initiator)"}
+                    Buyer wallet address {creatorRole === "buyer" && "(you)"}
                   </label>
                   <input
                     type="text"
@@ -538,7 +631,7 @@ export default function CreateTradePage() {
 
                 <div>
                   <label className="block text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#A6A39B] mb-1.5">
-                    Seller Wallet Address {creatorRole === "seller" && "(Initiator)"}
+                    Seller wallet address {creatorRole === "seller" && "(you)"}
                   </label>
                   <input
                     type="text"
@@ -552,7 +645,7 @@ export default function CreateTradePage() {
 
                 <div>
                   <label className="block text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#A6A39B] mb-1.5">
-                    Independent Neutral Arbiter (Must be distinct from Buyer &amp; Seller)
+                    Optional independent dispute resolver
                   </label>
                   <input
                     type="text"
@@ -562,8 +655,8 @@ export default function CreateTradePage() {
                     className="w-full px-3.5 py-2.5 rounded-[3px] bg-[#090A0C] border border-white/[0.12] font-mono-tabular text-[12px] text-[#A6A39B]"
                   />
                   <p className="text-[11px] text-[#6E6C65] mt-1">
-                    Accord enforces separation of duties: neither Buyer nor Seller may act as
-                    arbiter over their own trade.
+                    If you add someone to help resolve a disagreement, they must not be the buyer
+                    or seller.
                   </p>
                 </div>
               </div>
@@ -574,7 +667,7 @@ export default function CreateTradePage() {
                   onClick={() => goToStep(2)}
                   className="px-5 py-2.5 rounded-[3px] bg-[#C5A46D] hover:bg-[#D6B882] text-[#090A0C] text-[12px] font-medium inline-flex items-center gap-2 transition-colors"
                 >
-                  <span>Continue to Terms &amp; Clauses</span>
+                  <span>Continue to trade details</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
               </div>
@@ -589,7 +682,7 @@ export default function CreateTradePage() {
                     Stage 02 of 03
                   </div>
                   <h2 className="text-[18px] font-medium text-[#F4F2ED] mt-1">
-                    Agreed Terms &amp; Settlement Conditions
+                    Agree on the details
                   </h2>
                 </div>
 
@@ -611,7 +704,7 @@ export default function CreateTradePage() {
               {/* Written Agreement Clause */}
               <div className="space-y-2">
                 <label className="block text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#A6A39B]">
-                  Written Agreement Clause (Version 1)
+                  What each person agrees to do
                 </label>
                 <textarea
                   rows={4}
@@ -621,15 +714,15 @@ export default function CreateTradePage() {
                   className="w-full px-4 py-3 rounded-[3px] bg-[#090A0C] border border-white/[0.12] text-[14px] text-[#F4F2ED] leading-relaxed"
                 />
                 <p className="text-[11px] text-[#6E6C65]">
-                  This clause is hashed with SHA-256 upon creation. Any subsequent amendment will
-                  increment the version number and require fresh counterparty acceptance.
+                  Be specific about what is being exchanged, who does each part, and any deadlines.
+                  If the terms change later, both people must review and accept the update.
                 </p>
               </div>
 
               {/* Conditions List */}
               <div className="space-y-3 pt-2 border-t border-white/[0.07]">
                 <label className="block text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#A6A39B]">
-                  Required Settlement Conditions ({conditions.length})
+                  Requirements to complete the trade ({conditions.length})
                 </label>
 
                 <div className="divide-y divide-white/[0.07] border border-white/[0.08] rounded-[3px] bg-[#090A0C]">
@@ -654,8 +747,8 @@ export default function CreateTradePage() {
                             }`}
                           >
                             {cond.type === "onchain_receipt"
-                              ? "On-Chain · Tatum RPC"
-                              : "Off-Chain · Participant Attestation"}
+                              ? "Payment check"
+                              : "People confirm"}
                           </span>
                         </div>
                         <p className="text-[12px] text-[#A6A39B] pl-6">{cond.description}</p>
@@ -664,7 +757,7 @@ export default function CreateTradePage() {
                         type="button"
                         onClick={() => handleRemoveCondition(idx)}
                         className="text-[#6E6C65] hover:text-[#F28B8B] p-1 transition-colors"
-                        title="Remove clause"
+                        title="Remove requirement"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -675,14 +768,14 @@ export default function CreateTradePage() {
                 {/* Add Clause Controls */}
                 <div className="p-4 rounded-[3px] bg-[#0B0D10] border border-white/[0.08] space-y-3">
                   <div className="text-[11px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
-                    Append Settlement Clause
+                    Add a requirement
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <input
                       type="text"
                       value={newCondTitle}
                       onChange={(e) => setNewCondTitle(e.target.value)}
-                      placeholder="Clause title (e.g., Domain Registrant Transfer)"
+                      placeholder="Requirement (e.g., transfer account ownership)"
                       className="px-3 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.1] text-[12px] text-[#F4F2ED]"
                     />
                     <select
@@ -691,13 +784,13 @@ export default function CreateTradePage() {
                       className="px-3 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.1] font-mono-tabular text-[12px] text-[#F4F2ED]"
                     >
                       <option value="external_delivery">
-                        Off-Chain: Deliverable Handover Attestation
+                        Delivery completed
                       </option>
                       <option value="inspection">
-                        Off-Chain: Buyer Inspection Sign-Off
+                        Buyer confirms delivery
                       </option>
                       <option value="onchain_receipt">
-                        On-Chain: Tatum RPC Receipt Proof
+                        Payment confirmed
                       </option>
                     </select>
                   </div>
@@ -706,7 +799,7 @@ export default function CreateTradePage() {
                       type="text"
                       value={newCondDesc}
                       onChange={(e) => setNewCondDesc(e.target.value)}
-                      placeholder="Verification criteria…"
+                      placeholder="How will you know it is complete?"
                       className="flex-1 px-3 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.1] text-[12px] text-[#F4F2ED]"
                     />
                     <button
@@ -715,7 +808,7 @@ export default function CreateTradePage() {
                       className="px-3.5 py-2 rounded-[3px] bg-[#13161C] hover:bg-[#181C24] border border-white/[0.12] font-mono-tabular text-[12px] text-[#F4F2ED] inline-flex items-center gap-1"
                     >
                       <Plus className="w-3.5 h-3.5" />
-                      <span>Add Clause</span>
+                      <span>Add requirement</span>
                     </button>
                   </div>
                 </div>
@@ -736,7 +829,7 @@ export default function CreateTradePage() {
                   onClick={() => goToStep(3)}
                   className="px-5 py-2.5 rounded-[3px] bg-[#C5A46D] hover:bg-[#D6B882] text-[#090A0C] text-[12px] font-medium inline-flex items-center gap-2 transition-colors"
                 >
-                  <span>Review Agreement</span>
+                  <span>Review trade</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
               </div>
@@ -750,7 +843,7 @@ export default function CreateTradePage() {
                   Stage 03 of 03
                 </div>
                 <h2 className="text-[18px] font-medium text-[#F4F2ED] mt-1">
-                  Review &amp; Issue Agreement Invitation
+                  Review and share the trade
                 </h2>
               </div>
 
@@ -779,7 +872,7 @@ export default function CreateTradePage() {
 
               <div className="space-y-2">
                 <div className="text-[11px] font-mono-tabular text-[#6E6C65] uppercase">
-                  Version 1 Agreed Terms
+                  Version 1 terms
                 </div>
                 <div className="p-4 rounded-[3px] bg-[#090A0C] border border-white/[0.08] text-[13px] text-[#D8D5CE] leading-relaxed">
                   {agreedTerms}
@@ -787,10 +880,10 @@ export default function CreateTradePage() {
               </div>
 
               <div className="p-4 rounded-[3px] bg-[#13161C] border border-white/[0.08] text-[12px] text-[#A6A39B] leading-relaxed">
-                <strong className="text-[#F4F2ED] font-medium">What happens next:</strong> Issuing
-                this agreement records Version 1 in Walrus Memory and generates a unique
-                counterparty invitation link. No funds are transferred until the counterparty
-                reviews and signs the agreement.
+                <strong className="text-[#F4F2ED] font-medium">What happens next:</strong> Accord
+                saves these details and creates a link for the other person to review and accept
+                the terms. Do not send payment until both people have agreed and you have checked
+                the payment arrangement in the trade room.
               </div>
 
               <div className="flex items-center justify-between pt-2">
@@ -800,7 +893,7 @@ export default function CreateTradePage() {
                   className="px-4 py-2.5 rounded-[3px] border border-white/[0.1] font-mono-tabular text-[12px] text-[#A6A39B] hover:text-[#F4F2ED] inline-flex items-center gap-1.5"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>Edit Clauses</span>
+                  <span>Edit requirements</span>
                 </button>
 
                 <button
@@ -810,8 +903,8 @@ export default function CreateTradePage() {
                 >
                   <span>
                     {submitting
-                      ? "Issuing Agreement & Anchoring Memory…"
-                      : "Issue Agreement & Generate Invite Link"}
+                      ? "Creating your trade…"
+                      : "Create trade and get invite link"}
                   </span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
@@ -820,7 +913,7 @@ export default function CreateTradePage() {
           )}
         </div>
 
-        {/* Right 5 Columns: Live Instrument Preview & Walrus Counterparty Recall */}
+        {/* Trade preview and saved history */}
         <div className="lg:col-span-5 space-y-6 lg:sticky lg:top-20">
           {/* Live Draft Instrument Preview */}
           <div className="surface-instrument rounded-[4px] overflow-hidden">
@@ -858,7 +951,7 @@ export default function CreateTradePage() {
 
               <div className="pt-2 border-t border-white/[0.07]">
                 <div className="text-[10px] font-mono-tabular uppercase text-[#6E6C65] mb-1">
-                  Conditions ({conditions.length})
+                  Requirements ({conditions.length})
                 </div>
                 <ul className="space-y-1 text-[12px] text-[#A6A39B]">
                   {conditions.map((c, i) => (
@@ -867,7 +960,7 @@ export default function CreateTradePage() {
                         {i + 1}. {c.title}
                       </span>
                       <span className="font-mono-tabular text-[10px] text-[#6E6C65] shrink-0">
-                        {c.type === "onchain_receipt" ? "Tatum RPC" : "Attestation"}
+                        {c.type === "onchain_receipt" ? "Payment check" : "People confirm"}
                       </span>
                     </li>
                   ))}
@@ -876,11 +969,11 @@ export default function CreateTradePage() {
             </div>
           </div>
 
-          {/* Persistent Walrus Memory Counterparty Recall */}
+          {/* Relevant saved trade history */}
           <div className="surface-panel rounded-[4px] p-5 space-y-3.5">
             <div className="flex items-center justify-between border-b border-white/[0.07] pb-2.5 font-mono-tabular text-[11px]">
               <span className="text-[#C5A46D] uppercase tracking-[0.06em]">
-                Walrus Memory — Counterparty Context
+                Relevant history for this trading partner
               </span>
               <span className="text-[#6E6C65]">
                 {counterpartyAddress.slice(0, 8)}…{counterpartyAddress.slice(-4)}
@@ -889,12 +982,11 @@ export default function CreateTradePage() {
 
             {loadingRecall ? (
               <div className="py-4 text-[12px] font-mono-tabular text-[#6E6C65]">
-                Querying persistent memory records…
+                Looking for saved trade history…
               </div>
             ) : recalledMemories.length === 0 ? (
               <p className="text-[12px] text-[#A6A39B] leading-relaxed">
-                No prior trade records or dispute notices found in Walrus Memory for this
-                counterparty address.
+                No earlier trade records or disagreement notices were found for this wallet.
               </p>
             ) : (
               <div className="divide-y divide-white/[0.06]">

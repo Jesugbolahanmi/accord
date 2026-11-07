@@ -39,6 +39,16 @@ export const SUPPORTED_NETWORKS: Record<string, NetworkConfig> = {
     blockExplorer: "https://sepolia.basescan.org",
     chainId: 84532,
   },
+  "arbitrum-one": {
+    id: "arbitrum-one",
+    name: "Arbitrum One",
+    slug: "arbitrum-one",
+    gatewayUrl: "https://arbitrum-mainnet.gateway.tatum.io",
+    fallbackRpcUrl: "https://arb1.arbitrum.io/rpc",
+    nativeCurrency: "ETH",
+    blockExplorer: "https://arbiscan.io",
+    chainId: 42161,
+  },
   "ethereum-mainnet": {
     id: "ethereum-mainnet",
     name: "Ethereum Mainnet",
@@ -63,6 +73,73 @@ export const SUPPORTED_NETWORKS: Record<string, NetworkConfig> = {
 
 const ERC20_TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+type JsonRpcValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonRpcValue[]
+  | { [key: string]: JsonRpcValue };
+
+interface RpcTransaction {
+  from?: string;
+  to?: string | null;
+  value?: string;
+}
+
+interface RpcReceipt {
+  status?: string | number;
+  blockNumber?: string;
+  from?: string | null;
+  to?: string | null;
+  gasUsed?: string;
+  contractAddress?: string | null;
+  logs?: unknown[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asRpcTransaction(value: unknown): RpcTransaction | null {
+  if (value === null) return null;
+  if (!isRecord(value)) throw new Error("Invalid Tatum RPC transaction response.");
+  return {
+    from: typeof value.from === "string" ? value.from : undefined,
+    to: typeof value.to === "string" || value.to === null ? value.to : undefined,
+    value: typeof value.value === "string" ? value.value : undefined,
+  };
+}
+
+function asRpcReceipt(value: unknown): RpcReceipt | null {
+  if (value === null) return null;
+  if (!isRecord(value)) throw new Error("Invalid Tatum RPC receipt response.");
+  return {
+    status:
+      typeof value.status === "string" || typeof value.status === "number"
+        ? value.status
+        : undefined,
+    blockNumber: typeof value.blockNumber === "string" ? value.blockNumber : undefined,
+    from: typeof value.from === "string" || value.from === null ? value.from : undefined,
+    to: typeof value.to === "string" || value.to === null ? value.to : undefined,
+    gasUsed: typeof value.gasUsed === "string" ? value.gasUsed : undefined,
+    contractAddress:
+      typeof value.contractAddress === "string" || value.contractAddress === null
+        ? value.contractAddress
+        : undefined,
+    logs: Array.isArray(value.logs) ? value.logs : undefined,
+  };
+}
+
+function parseHexQuantity(value: unknown): number {
+  if (typeof value !== "string") throw new Error("Invalid Tatum RPC quantity response.");
+  return parseInt(value, 16);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /**
  * Convert a decimal amount string (e.g. "0.000371") to wei/smallest unit without floating point loss.
@@ -93,8 +170,8 @@ export interface VerificationResult {
   requiredConfirmations?: number;
   blockNumber?: number;
   txHash: string;
-  from?: string;
-  to?: string;
+  from?: string | null;
+  to?: string | null;
   valueEth?: string;
   asset?: string;
   network: string;
@@ -103,7 +180,7 @@ export interface VerificationResult {
   errorMessage?: string;
   receipt?: {
     gasUsed?: string;
-    status?: string;
+    status?: string | number;
     contractAddress?: string | null;
     logsCount?: number;
   };
@@ -127,7 +204,11 @@ export class TatumRpcClient {
   /**
    * Generic JSON-RPC call dispatcher targeting Tatum Gateway with automatic retry on 429 burst throttling
    */
-  async rpcCall(networkSlug: string, method: string, params: any[] = []): Promise<any> {
+  async rpcCall(
+    networkSlug: string,
+    method: string,
+    params: JsonRpcValue[] = []
+  ): Promise<{ result: unknown; latencyMs: number }> {
     const network = SUPPORTED_NETWORKS[networkSlug] || SUPPORTED_NETWORKS["base-mainnet"];
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -174,9 +255,11 @@ export class TatumRpcClient {
       throw new Error(`Tatum RPC HTTP error (${response.status}): ${errText}`);
     }
 
-    const data = await response.json();
+    const data: unknown = await response.json();
+    if (!isRecord(data)) throw new Error("Invalid Tatum RPC response.");
     if (data.error) {
-      throw new Error(`Tatum RPC Error [${data.error.code}]: ${data.error.message}`);
+      const rpcError = isRecord(data.error) ? data.error : {};
+      throw new Error(`Tatum RPC Error [${rpcError.code}]: ${rpcError.message}`);
     }
 
     return { result: data.result, latencyMs };
@@ -188,7 +271,7 @@ export class TatumRpcClient {
   async getBlockNumber(networkSlug: string): Promise<{ blockNumber: number; latencyMs: number }> {
     const { result, latencyMs } = await this.rpcCall(networkSlug, "eth_blockNumber");
     return {
-      blockNumber: parseInt(result, 16),
+      blockNumber: parseHexQuantity(result),
       latencyMs,
     };
   }
@@ -198,6 +281,7 @@ export class TatumRpcClient {
    */
   async getBalance(address: string, networkSlug: string): Promise<string> {
     const { result } = await this.rpcCall(networkSlug, "eth_getBalance", [address, "latest"]);
+    if (typeof result !== "string") throw new Error("Invalid Tatum RPC balance response.");
     const wei = BigInt(result);
     const ethWhole = wei / BigInt(10 ** 18);
     const ethRemainder = wei % BigInt(10 ** 18);
@@ -251,11 +335,11 @@ export class TatumRpcClient {
         this.rpcCall(networkSlug, "eth_blockNumber", []),
       ]);
 
-      const tx = txData.result;
-      const receipt = receiptData.result;
-      const currentBlock = parseInt(blockData.result, 16);
+      const tx = asRpcTransaction(txData.result);
+      const receipt = asRpcReceipt(receiptData.result);
+      const currentBlock = parseHexQuantity(blockData.result);
 
-      if (!tx && !receipt) {
+      if (!receipt && tx === null) {
         return {
           verified: false,
           status: "not_found",
@@ -268,7 +352,7 @@ export class TatumRpcClient {
         };
       }
 
-      if (tx && !receipt) {
+      if (tx && receipt === null) {
         return {
           verified: false,
           status: "pending",
@@ -284,8 +368,9 @@ export class TatumRpcClient {
         };
       }
 
+      if (!receipt) throw new Error("Invalid Tatum RPC receipt response.");
       const isSuccess = receipt.status === "0x1" || receipt.status === 1;
-      const txBlock = parseInt(receipt.blockNumber, 16);
+      const txBlock = parseHexQuantity(receipt.blockNumber);
       const confirmations = Math.max(1, currentBlock - txBlock + 1);
 
       if (!isSuccess) {
@@ -316,16 +401,18 @@ export class TatumRpcClient {
       // Decode ERC-20 Transfer(address,address,uint256) event log when native value is 0 or asset is ERC-20
       if ((txValueWei === BigInt(0) || isStablecoin) && Array.isArray(receipt.logs)) {
         const transferLog = receipt.logs.find(
-          (log: any) =>
+          (log): log is Record<string, unknown> =>
+            isRecord(log) &&
             Array.isArray(log.topics) &&
             log.topics.length >= 3 &&
             String(log.topics[0]).toLowerCase() === ERC20_TRANSFER_TOPIC
         );
         if (transferLog) {
-          effectiveFrom = `0x${String(transferLog.topics[1]).slice(-40)}`;
-          effectiveTo = `0x${String(transferLog.topics[2]).slice(-40)}`;
+          const topics = transferLog.topics as unknown[];
+          effectiveFrom = `0x${String(topics[1]).slice(-40)}`;
+          effectiveTo = `0x${String(topics[2]).slice(-40)}`;
           if (transferLog.data && transferLog.data !== "0x") {
-            txValueWei = BigInt(transferLog.data);
+            txValueWei = BigInt(String(transferLog.data));
             valueFormatted = weiToDecimal(txValueWei, tokenDecimals);
           }
         }
@@ -440,13 +527,13 @@ export class TatumRpcClient {
         chainId: network.chainId,
         timestamp: Date.now(),
         receipt: {
-          gasUsed: parseInt(receipt.gasUsed, 16).toString(),
+          gasUsed: parseInt(String(receipt.gasUsed), 16).toString(),
           status: receipt.status,
           contractAddress: receipt.contractAddress,
           logsCount: Array.isArray(receipt.logs) ? receipt.logs.length : 0,
         },
       };
-    } catch (err: any) {
+    } catch (err: unknown) {
       return {
         verified: false,
         status: "not_found",
@@ -455,7 +542,7 @@ export class TatumRpcClient {
         txHash: cleanHash,
         network: networkSlug,
         chainId: network.chainId,
-        errorMessage: `Tatum RPC verification error: ${err.message}`,
+        errorMessage: `Tatum RPC verification error: ${errorMessage(err)}`,
       };
     }
   }

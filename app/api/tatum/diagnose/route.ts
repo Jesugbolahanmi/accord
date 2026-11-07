@@ -5,7 +5,7 @@ import { TatumAIBuilder } from "@/lib/tatum/ai-builder";
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const network = searchParams.get("network") || "base-mainnet";
+    const network = searchParams.get("network") || "base-sepolia";
 
     const [diagnostic, manifest, supportedChains] = await Promise.all([
       tatum.diagnose(network),
@@ -30,8 +30,11 @@ export async function GET(request: Request) {
         supportedChainsTotal: supportedChains.length,
       },
     });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 500 }
+    );
   }
 }
 
@@ -39,7 +42,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const txHash = body.txHash || "";
-    const network = body.network || "base-mainnet";
+    const network = body.network || "base-sepolia";
 
     const verification = await tatum.verifyTransaction(txHash, network, {
       from: body.expectedFrom,
@@ -50,7 +53,10 @@ export async function POST(request: Request) {
       success: true,
       verification,
     });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 500 }
+    );
   }
 }

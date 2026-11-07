@@ -2,24 +2,49 @@
 
 import { useState, useEffect } from "react";
 import { RefreshCw, Search } from "lucide-react";
+import type { VerificationResult } from "@/lib/tatum/client";
+
+type DiagnosticResult = {
+  diagnostic: {
+    network: { gatewayUrl: string; chainId: number };
+    blockNumber: number;
+    latencyMs: number;
+    status: "healthy" | "degraded" | "offline";
+    apiKeyConfigured: boolean;
+    timestamp: string;
+  };
+  aiBuilder: {
+    connected: boolean;
+    manifestSummary: {
+      chainsCount?: number;
+      workflowsCount?: number;
+    } | null;
+  };
+};
+
+interface DiagnosticResponse extends DiagnosticResult {
+  success?: boolean;
+}
+
+interface VerificationResponse {
+  success?: boolean;
+  verification?: VerificationResult;
+}
 
 export default function TatumDiagnosticPage() {
-  const [selectedNetwork, setSelectedNetwork] = useState("base-mainnet");
-  const [diagData, setDiagData] = useState<any | null>(null);
+  const [selectedNetwork, setSelectedNetwork] = useState("base-sepolia");
+  const [diagData, setDiagData] = useState<DiagnosticResult | null>(null);
   const [loadingDiag, setLoadingDiag] = useState(true);
 
-  const [txHash, setTxHash] = useState(
-    "0x5e628c371187d00fc4be945623e25acdac3464545512b9c03002259d95887b6c"
-  );
-  const [txNetwork, setTxNetwork] = useState("base-mainnet");
+  const [txHash, setTxHash] = useState("");
+  const [txNetwork, setTxNetwork] = useState("base-sepolia");
   const [verifying, setVerifying] = useState(false);
-  const [verificationResult, setVerificationResult] = useState<any | null>(null);
+  const [verificationResult, setVerificationResult] = useState<VerificationResult | null>(null);
 
   const runDiagnostics = async (network = selectedNetwork) => {
-    setLoadingDiag(true);
     try {
       const res = await fetch(`/api/tatum/diagnose?network=${encodeURIComponent(network)}`);
-      const data = await res.json();
+      const data = (await res.json()) as DiagnosticResponse;
       if (data.success) {
         setDiagData(data);
       }
@@ -31,7 +56,23 @@ export default function TatumDiagnosticPage() {
   };
 
   useEffect(() => {
-    runDiagnostics(selectedNetwork);
+    let active = true;
+    void fetch(`/api/tatum/diagnose?network=${encodeURIComponent(selectedNetwork)}`)
+      .then(async (res) => (await res.json()) as DiagnosticResponse)
+      .then((data) => {
+        if (active && data.success) {
+          setDiagData(data);
+        }
+      })
+      .catch((err: unknown) => {
+        if (active) console.error("Failed to run Tatum diagnostics:", err);
+      })
+      .finally(() => {
+        if (active) setLoadingDiag(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [selectedNetwork]);
 
   const handleInspectTx = async (e: React.FormEvent) => {
@@ -47,8 +88,8 @@ export default function TatumDiagnosticPage() {
           network: txNetwork,
         }),
       });
-      const data = await res.json();
-      if (data.success) {
+      const data = (await res.json()) as VerificationResponse;
+      if (data.success && data.verification) {
         setVerificationResult(data.verification);
       }
     } catch (err) {
@@ -71,25 +112,32 @@ export default function TatumDiagnosticPage() {
           </h1>
           <p className="text-[14px] text-[#A6A39B] max-w-[64ch]">
             Inspect live block height, RPC round-trip latency, and raw transaction receipts across
-            Base, Ethereum, and Polygon through the Tatum Gateway.
+            Base, Arbitrum, Ethereum, and Polygon through the Tatum Gateway.
           </p>
         </div>
 
         <div className="flex items-center gap-2.5 shrink-0">
           <select
             value={selectedNetwork}
-            onChange={(e) => setSelectedNetwork(e.target.value)}
+            onChange={(e) => {
+              setLoadingDiag(true);
+              setSelectedNetwork(e.target.value);
+            }}
             className="px-3 py-2 rounded-[3px] bg-[#0E1014] border border-white/[0.12] font-mono-tabular text-[12px] text-[#F4F2ED]"
           >
             <option value="base-mainnet">Base Mainnet (base-mainnet)</option>
             <option value="base-sepolia">Base Sepolia (base-sepolia)</option>
+            <option value="arbitrum-one">Arbitrum One (arbitrum-one)</option>
             <option value="ethereum-mainnet">Ethereum Mainnet (ethereum-mainnet)</option>
             <option value="polygon-mainnet">Polygon Mainnet (polygon-mainnet)</option>
           </select>
 
           <button
             type="button"
-            onClick={() => runDiagnostics(selectedNetwork)}
+            onClick={() => {
+              setLoadingDiag(true);
+              void runDiagnostics(selectedNetwork);
+            }}
             className="px-4 py-2 rounded-[3px] bg-[#13161C] hover:bg-[#181C24] border border-white/[0.14] font-mono-tabular text-[12px] text-[#F4F2ED] inline-flex items-center gap-2 transition-colors"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loadingDiag ? "animate-spin text-[#C5A46D]" : ""}`} />
@@ -166,7 +214,8 @@ export default function TatumDiagnosticPage() {
             </h2>
             <p className="text-[12px] text-[#A6A39B] mt-0.5">
               Execute <code className="font-mono-tabular text-[#F4F2ED]">tatum.verifyTransaction()</code>{" "}
-              against any transaction hash. Pre-filled with a live Base Mainnet transaction.
+              against a transaction hash you provide. A successful RPC check alone does not confirm
+              an Accord escrow deposit.
             </p>
           </div>
           <span className="font-mono-tabular text-[11px] text-[#C5A46D]">
@@ -194,6 +243,7 @@ export default function TatumDiagnosticPage() {
             >
               <option value="base-mainnet">Base Mainnet</option>
               <option value="base-sepolia">Base Sepolia</option>
+              <option value="arbitrum-one">Arbitrum One</option>
               <option value="ethereum-mainnet">Ethereum Mainnet</option>
               <option value="polygon-mainnet">Polygon Mainnet</option>
             </select>

@@ -1,28 +1,23 @@
 /**
  * Accord - Trade State Machine & Persistent Store
  *
- * Implements full life cycle for P2P Crypto Trades:
+ * Persists the app's P2P trade workflow:
  * Draft -> AwaitingAcceptance -> AwaitingDeposit -> Funded ->
  * AwaitingConditions -> ReadyForRelease -> Completed / Disputed / Refunded / Expired
  *
- * Security & Integrity Invariants:
- * 1. Never allow a frontend button alone to mark a trade as Funded without a verified
- *    Tatum RPC transaction receipt.
- * 2. Modifying agreed terms creates a visible new TermsVersion and resets counterparty
- *    acceptance (`AwaitingAcceptance`), preventing silent overwrites.
- * 3. On-chain conditions (`onchain_receipt`) require Tatum RPC proof; off-chain conditions
- *    (`external_delivery`, `inspection`, `mutual_signature`) are explicitly labeled as
- *    participant attestations anchored to Walrus Memory with SHA-256 evidence hashes.
- * 4. Arbiters must be neutral (neither buyer nor seller).
+ * Hosted deployments use Supabase; local JSON persistence is limited to development and tests.
+ * Wallets submit escrow transactions, while this store persists trade state and verified activity.
+ * Term changes create a new version, and dispute outcomes are recorded as app state.
  */
 
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { walrusMemory } from "../walrus/memory";
 import { VerificationResult } from "../tatum/client";
-import { getEscrowAddress } from "../contracts/AccordEscrow";
+import { getEscrowAddress } from "../contracts/escrow-config.server";
 
 export type TradeStatus =
   | "Draft"
@@ -74,9 +69,11 @@ export interface TradeActivity {
     | "CONDITION_COMPLETED"
     | "SELLER_FULFILLED"
     | "FUNDS_RELEASED"
+    | "TRADE_MARKED_COMPLETE"
     | "DISPUTE_RAISED"
     | "DISPUTE_RESOLVED"
     | "FUNDS_REFUNDED"
+    | "REFUND_RECORDED"
     | "WALRUS_MEMORY_SAVED";
   title: string;
   description: string;
@@ -126,7 +123,6 @@ export interface Trade {
   conditions: SettlementCondition[];
   submittedTxHash?: string;
   txHash?: string;
-  sampleVerifiableTxHash?: string;
   verification?: VerificationResult;
   releaseTxHash?: string;
   refundTxHash?: string;
@@ -147,55 +143,198 @@ export interface Trade {
 }
 
 const TRADE_STORE: Map<string, Trade> = new Map();
+const LEGACY_SHOWCASE_IDS = new Set([
+  "trade-base-sepolia-8812",
+  "trade-base-mainnet-8812",
+  "trade-eth-domain-9041",
+]);
+const LEGACY_SHOWCASE_REFERENCES = new Set(["ACC-2026-8812", "ACC-2026-9041"]);
 let tradesHydrated = false;
+let supabaseClient: SupabaseClient | null = null;
+const tradeRevisions = new WeakMap<Trade, number>();
+
+function isLegacyShowcaseTrade(trade: Trade): boolean {
+  return (
+    LEGACY_SHOWCASE_IDS.has(trade.id) ||
+    LEGACY_SHOWCASE_REFERENCES.has(trade.reference) ||
+    ("isExample" in trade && trade.isExample === true)
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function getTradesFilePath(): string {
   if (process.env.ACCORD_TEST_MODE === "1") {
     return path.join(os.tmpdir(), `accord-test-trades-${process.pid}.json`);
   }
   const localDir = path.join(process.cwd(), ".accord-data");
-  try {
-    if (!fs.existsSync(localDir)) {
-      fs.mkdirSync(localDir, { recursive: true });
-    }
-    return path.join(localDir, "trades.json");
-  } catch {
-    return path.join(os.tmpdir(), "accord-trades.json");
+  if (!fs.existsSync(localDir)) {
+    fs.mkdirSync(localDir, { recursive: true });
   }
+  return path.join(localDir, "trades.json");
+}
+
+function getSupabaseClient(): SupabaseClient | null {
+  if (process.env.ACCORD_TEST_MODE === "1") return null;
+  if (supabaseClient) return supabaseClient;
+
+  const url = process.env.SUPABASE_URL?.trim();
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (url || serviceRoleKey) {
+    if (!url || !serviceRoleKey) {
+      throw new Error("Both SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for shared trade storage.");
+    }
+    supabaseClient = createClient(url, serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+        detectSessionInUrl: false,
+      },
+    });
+    return supabaseClient;
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Shared trade storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
+  }
+  return null;
 }
 
 function hydrateTradesFromDisk(): void {
   if (tradesHydrated) return;
   tradesHydrated = true;
-  try {
-    const file = getTradesFilePath();
-    if (fs.existsSync(file)) {
-      const raw = fs.readFileSync(file, "utf8");
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        for (const t of parsed) {
-          if (t && t.id && t.reference) {
-            TRADE_STORE.set(t.id, t);
-            TRADE_STORE.set(t.reference, t);
-          }
-        }
-      }
+  if (process.env.SUPABASE_URL?.trim() || process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) return;
+  if (process.env.NODE_ENV === "production" && process.env.ACCORD_TEST_MODE !== "1") return;
+
+  const file = getTradesFilePath();
+  if (!fs.existsSync(file)) return;
+  const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (!Array.isArray(parsed)) throw new Error("The local trade store is malformed: expected an array.");
+  for (const value of parsed) {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !("id" in value) ||
+      typeof value.id !== "string" ||
+      !("reference" in value) ||
+      typeof value.reference !== "string"
+    ) {
+      throw new Error("The local trade store contains an invalid trade record.");
     }
-  } catch {
-    // Continue with in-memory store
+    const trade = value as Trade;
+    if (isLegacyShowcaseTrade(trade)) continue;
+    TRADE_STORE.set(trade.id, trade);
+    TRADE_STORE.set(trade.reference, trade);
+    tradeRevisions.set(trade, 1);
   }
 }
 
 function persistTradesToDisk(): void {
-  try {
-    const file = getTradesFilePath();
-    const unique = Array.from(
-      new Map(Array.from(TRADE_STORE.values()).map((t) => [t.id, t])).values()
-    );
-    fs.writeFileSync(file, JSON.stringify(unique, null, 2), "utf8");
-  } catch {
-    // Ignore write failure in read-only environments
+  const file = getTradesFilePath();
+  const unique = Array.from(
+    new Map(Array.from(TRADE_STORE.values()).map((trade) => [trade.id, trade])).values()
+  );
+  fs.writeFileSync(file, JSON.stringify(unique, null, 2), "utf8");
+}
+
+type SupabaseTradeRow = { trade: Trade; revision: number };
+
+function mapSupabaseTrade(row: SupabaseTradeRow | null): Trade | null {
+  if (!row) return null;
+  if (!row.trade || typeof row.trade.id !== "string" || typeof row.trade.reference !== "string") {
+    throw new Error("Supabase returned a malformed trade record.");
   }
+  tradeRevisions.set(row.trade, Number(row.revision));
+  return row.trade;
+}
+
+async function persistTrade(trade: Trade): Promise<void> {
+  const client = getSupabaseClient();
+  if (!client) {
+    TRADE_STORE.set(trade.id, trade);
+    TRADE_STORE.set(trade.reference, trade);
+    persistTradesToDisk();
+    return;
+  }
+
+  const expectedRevision = tradeRevisions.get(trade);
+  if (expectedRevision === undefined) {
+    const { data, error } = await client
+      .from("accord_trades")
+      .insert({
+        id: trade.id,
+        reference: trade.reference,
+        trade,
+        revision: 1,
+        created_at: trade.createdAt,
+        updated_at: trade.updatedAt,
+      })
+      .select("revision")
+      .single();
+    if (error) throw new Error(`Could not create shared trade record: ${error.message}`);
+    tradeRevisions.set(trade, Number(data.revision));
+    return;
+  }
+
+  const nextRevision = expectedRevision + 1;
+  const { data, error } = await client
+    .from("accord_trades")
+    .update({ trade, revision: nextRevision, updated_at: trade.updatedAt })
+    .eq("id", trade.id)
+    .eq("revision", expectedRevision)
+    .select("revision")
+    .maybeSingle();
+  if (error) throw new Error(`Could not update shared trade record: ${error.message}`);
+  if (!data) {
+    throw new Error("This trade changed in another session. Refresh the trade and retry your action.");
+  }
+  tradeRevisions.set(trade, Number(data.revision));
+}
+
+async function getSupabaseTrade(idOrRef: string): Promise<Trade | null> {
+  const client = getSupabaseClient();
+  if (!client) return null;
+
+  const { data: byId, error: idError } = await client
+    .from("accord_trades")
+    .select("trade,revision")
+    .eq("id", idOrRef)
+    .maybeSingle();
+  if (idError) throw new Error(`Could not load shared trade: ${idError.message}`);
+  if (byId) return mapSupabaseTrade(byId as SupabaseTradeRow);
+
+  const { data: byReference, error: referenceError } = await client
+    .from("accord_trades")
+    .select("trade,revision")
+    .eq("reference", idOrRef)
+    .maybeSingle();
+  if (referenceError) throw new Error(`Could not load shared trade: ${referenceError.message}`);
+  return mapSupabaseTrade(byReference as SupabaseTradeRow | null);
+}
+
+async function listSupabaseTrades(userAddress?: string): Promise<Trade[] | null> {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  const { data, error } = await client
+    .from("accord_trades")
+    .select("trade,revision")
+    .order("updated_at", { ascending: false });
+  if (error) throw new Error(`Could not list shared trades: ${error.message}`);
+  const trades = (data || [])
+    .map((row) => mapSupabaseTrade(row as SupabaseTradeRow)!)
+    .filter((trade) => !isLegacyShowcaseTrade(trade))
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  if (!userAddress) return trades;
+  const lower = userAddress.toLowerCase();
+  return trades.filter(
+    (trade) =>
+      trade.buyer.toLowerCase() === lower ||
+      trade.seller.toLowerCase() === lower ||
+      trade.arbiter.toLowerCase() === lower ||
+      trade.creator.toLowerCase() === lower
+  );
 }
 
 function computeTermsHash(terms: string): string {
@@ -228,7 +367,6 @@ export class TradeService {
       type?: SettlementCondition["type"];
     }>;
     expirationHours?: number;
-    sampleVerifiableTxHash?: string;
   }): Promise<Trade> {
     const buyerClean = params.buyer.trim().toLowerCase();
     const sellerClean = params.seller.trim().toLowerCase();
@@ -328,7 +466,6 @@ export class TradeService {
       sellerAcceptedAt: sellerAccepted ? nowIso : undefined,
       sellerFulfilled: false,
       conditions,
-      sampleVerifiableTxHash: params.sampleVerifiableTxHash,
       escrowAddress,
       settlementMode,
       expirationTimestamp,
@@ -415,18 +552,30 @@ export class TradeService {
         timestamp: new Date().toISOString(),
         walrusMemoryId: memory.id,
       });
-    } catch (err: any) {
-      console.warn("[TradeStore] Walrus anchor notice:", err.message);
+    } catch (err: unknown) {
+      console.warn("[TradeStore] Walrus anchor notice:", errorMessage(err));
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
   /**
    * Retrieve a trade by ID or Trade Reference (evaluating expiration dynamically)
    */
-  getTrade(idOrRef: string): Trade | null {
+  async getTrade(idOrRef: string): Promise<Trade | null> {
+    const sharedTrade = await getSupabaseTrade(idOrRef);
+    if (getSupabaseClient()) {
+      if (sharedTrade && isLegacyShowcaseTrade(sharedTrade)) return null;
+      if (sharedTrade && Date.now() > sharedTrade.expirationTimestamp &&
+          (sharedTrade.status === "Draft" ||
+            sharedTrade.status === "AwaitingAcceptance" ||
+            sharedTrade.status === "AwaitingDeposit")) {
+        sharedTrade.status = "Expired";
+      }
+      return sharedTrade;
+    }
+
     let trade = TRADE_STORE.get(idOrRef) || null;
     if (!trade) {
       const lower = (idOrRef || "").toLowerCase();
@@ -437,6 +586,7 @@ export class TradeService {
         }
       }
     }
+    if (trade && isLegacyShowcaseTrade(trade)) return null;
     if (trade) {
       if (
         Date.now() > trade.expirationTimestamp &&
@@ -453,8 +603,13 @@ export class TradeService {
   /**
    * List trades involving a user address, or all active trades
    */
-  listTrades(userAddress?: string): Trade[] {
-    const values = Array.from(TRADE_STORE.values());
+  async listTrades(userAddress?: string): Promise<Trade[]> {
+    const sharedTrades = await listSupabaseTrades(userAddress);
+    if (sharedTrades) return sharedTrades;
+
+    const values = Array.from(TRADE_STORE.values()).filter(
+      (trade) => !isLegacyShowcaseTrade(trade)
+    );
     const unique = Array.from(new Map(values.map((t) => [t.id, t])).values()).sort(
       (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
     );
@@ -484,7 +639,7 @@ export class TradeService {
     newTerms: string,
     changeSummary?: string
   ): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     if (
@@ -493,7 +648,7 @@ export class TradeService {
       trade.status !== "AwaitingDeposit"
     ) {
       throw new Error(
-        `Terms cannot be modified once funds are locked or trade is in ${trade.status} state.`
+        `Terms cannot be modified once the trade is in ${trade.status} state.`
       );
     }
 
@@ -579,11 +734,11 @@ export class TradeService {
         timestamp: new Date().toISOString(),
         walrusMemoryId: memory.id,
       });
-    } catch (err: any) {
-      console.warn("[TradeStore] Walrus amendment notice:", err.message);
+    } catch (err: unknown) {
+      console.warn("[TradeStore] Walrus amendment notice:", errorMessage(err));
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
@@ -591,7 +746,7 @@ export class TradeService {
    * Counterparty accepts trade terms
    */
   async acceptTerms(tradeId: string, participantAddress: string): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     const pLower = participantAddress.trim().toLowerCase();
@@ -670,11 +825,11 @@ export class TradeService {
         timestamp: new Date().toISOString(),
         walrusMemoryId: memory.id,
       });
-    } catch (err: any) {
-      console.warn("[TradeStore] Walrus anchor error:", err.message);
+    } catch (err: unknown) {
+      console.warn("[TradeStore] Walrus anchor error:", errorMessage(err));
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
@@ -686,7 +841,7 @@ export class TradeService {
     actor: string,
     txHash: string
   ): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     const cleanTx = txHash.trim();
@@ -736,7 +891,7 @@ export class TradeService {
       });
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
@@ -745,7 +900,7 @@ export class TradeService {
    * NEVER marks a trade as Funded without legitimate Tatum RPC verification!
    */
   async recordVerifiedDeposit(tradeId: string, verification: VerificationResult): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     if (!trade.buyerAccepted || !trade.sellerAccepted) {
@@ -783,7 +938,7 @@ export class TradeService {
       type: "DEPOSIT_VERIFIED",
       title: "Deposit Confirmed via Tatum RPC",
       description: `Transaction ${verification.txHash.slice(0, 10)}... confirmed on ${verification.network} at block ${verification.blockNumber} with ${verification.confirmations} confirmations (${verification.valueEth || trade.amount} ${trade.asset}).`,
-      actor: verification.from,
+      actor: verification.from ?? undefined,
       timestamp: trade.updatedAt,
       txHash: verification.txHash,
     });
@@ -829,11 +984,11 @@ export class TradeService {
         timestamp: new Date().toISOString(),
         walrusMemoryId: memory.id,
       });
-    } catch (err: any) {
-      console.warn("[TradeStore] Walrus anchor notice:", err.message);
+    } catch (err: unknown) {
+      console.warn("[TradeStore] Walrus anchor notice:", errorMessage(err));
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
@@ -847,7 +1002,7 @@ export class TradeService {
     actor: string,
     attestationNote?: string
   ): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     const condition = trade.conditions.find((c) => c.id === conditionId);
@@ -925,19 +1080,19 @@ export class TradeService {
         timestamp: trade.updatedAt,
         walrusMemoryId: mem.id,
       });
-    } catch (err: any) {
-      console.warn("[TradeStore] Walrus anchor notice:", err.message);
+    } catch (err: unknown) {
+      console.warn("[TradeStore] Walrus anchor notice:", errorMessage(err));
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
   /**
-   * Seller confirms fulfillment of deliverables (`AccordEscrow.confirmFulfillment`)
+   * Record the seller's confirmation of fulfillment.
    */
   async confirmFulfillment(tradeId: string, actor: string): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     const actorLower = actor.trim().toLowerCase();
@@ -987,26 +1142,26 @@ export class TradeService {
       walrusMemoryId: mem.id,
     });
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
   /**
-   * Buyer approves release of escrowed funds to seller (`AccordEscrow.approveRelease`)
+   * Record the buyer's approval to mark the trade complete.
    */
   async approveRelease(tradeId: string, actor: string, releaseTxHash?: string): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     if (!trade.verification?.verified) {
       throw new Error(
-        "Cannot release funds: No verified on-chain deposit has been confirmed by Tatum RPC."
+        "No verified on-chain deposit has been confirmed; Accord cannot mark the trade complete."
       );
     }
 
     if (trade.status === "Disputed") {
       throw new Error(
-        "Cannot unilaterally release funds while trade is in Disputed state. Neutral Arbiter must issue a ruling."
+        "Cannot mark this trade complete while a disagreement is open. Record an outcome first."
       );
     }
 
@@ -1014,34 +1169,32 @@ export class TradeService {
     const isBuyer = actorLower === trade.buyer.toLowerCase();
 
     if (!isBuyer) {
-      throw new Error(
-        "Only the Buyer can unilaterally approve release of escrowed funds. If the trade is disputed, the neutral Arbiter must use resolveDispute."
-      );
+      throw new Error("Only the buyer can mark this trade complete.");
     }
 
     const incompleteConditions = trade.conditions.filter((c) => !c.completed);
     if (incompleteConditions.length > 0) {
       throw new Error(
-        `Cannot release funds yet: ${incompleteConditions.length} settlement condition(s) remain unfulfilled.`
+        `This trade cannot be marked complete yet: ${incompleteConditions.length} requirement(s) remain.`
       );
     }
 
     trade.status = "Completed";
-    trade.releaseTxHash = releaseTxHash || trade.txHash;
+    trade.releaseTxHash = releaseTxHash;
     trade.updatedAt = new Date().toISOString();
 
     try {
       const memory = await walrusMemory.remember({
         tradeId: trade.id,
         tradeRef: trade.reference,
-        title: `Settlement Released & Completed — ${trade.reference}`,
+        title: `Trade Marked Complete — ${trade.reference}`,
         category: "Settlement",
         type: "SETTLEMENT_COMPLETED",
         actor: actorLower,
         sourceRole: "buyer",
-        content: `Trade ${trade.reference} completed and settled on ${trade.network}. ${trade.amount} ${trade.asset} released to Seller ${trade.seller} with Buyer ${trade.buyer} approval. Deposit tx: ${trade.txHash}.`,
+        content: `Trade ${trade.reference} was marked complete in Accord by Buyer ${trade.buyer}. This status update does not transfer or release funds. Payment transaction: ${trade.txHash || "not recorded"}.`,
         structuredPayload: {
-          outcome: "COMPLETED",
+          outcome: "MARKED_COMPLETE",
           amount: trade.amount,
           asset: trade.asset,
           network: trade.network,
@@ -1051,7 +1204,7 @@ export class TradeService {
           releaseTxHash: trade.releaseTxHash,
         },
         metadata: {
-          outcome: "COMPLETED",
+          outcome: "MARKED_COMPLETE",
           amount: trade.amount,
           asset: trade.asset,
           seller: trade.seller,
@@ -1064,19 +1217,19 @@ export class TradeService {
 
       trade.activity.push({
         id: `act-${Date.now()}-rel`,
-        type: "FUNDS_RELEASED",
-        title: "Escrow Released to Seller — Trade Completed",
-        description: `Buyer ${actorLower.slice(0, 6)}...${actorLower.slice(-4)} authorized settlement release of ${trade.amount} ${trade.asset} to Seller ${trade.seller.slice(0, 6)}...${trade.seller.slice(-4)}.`,
+        type: "TRADE_MARKED_COMPLETE",
+        title: "Trade marked complete in Accord",
+        description: "The buyer marked this trade complete. This status update does not move funds.",
         actor: actorLower,
         timestamp: trade.updatedAt,
         txHash: trade.releaseTxHash,
         walrusMemoryId: memory.id,
       });
-    } catch (err: any) {
-      console.warn("[TradeStore] Walrus anchor notice:", err.message);
+    } catch (err: unknown) {
+      console.warn("[TradeStore] Walrus anchor notice:", errorMessage(err));
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
@@ -1089,7 +1242,7 @@ export class TradeService {
     reason: string,
     evidenceContent?: string
   ): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     const actorLower = actor.trim().toLowerCase();
@@ -1147,22 +1300,22 @@ export class TradeService {
       trade.activity.push({
         id: `act-${Date.now()}-disp`,
         type: "DISPUTE_RAISED",
-        title: "Dispute Lodged — Escrow Frozen",
-        description: `Dispute raised by ${actorLower.slice(0, 6)}...${actorLower.slice(-4)}: "${reason}". Evidence SHA-256 hash ${evidenceHash.slice(0, 14)}... preserved in Memory Box.`,
+        title: "Disagreement recorded",
+        description: `A disagreement was recorded by ${actorLower.slice(0, 6)}...${actorLower.slice(-4)}: "${reason}". Evidence checksum ${evidenceHash.slice(0, 14)}... saved in Memory Box. No funds are frozen by this action.`,
         actor: actorLower,
         timestamp: trade.updatedAt,
         walrusMemoryId: memory.id,
       });
-    } catch (err: any) {
-      console.warn("[TradeStore] Walrus anchor notice:", err.message);
+    } catch (err: unknown) {
+      console.warn("[TradeStore] Walrus anchor notice:", errorMessage(err));
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
   /**
-   * Resolve a dispute via Neutral Arbiter (`AccordEscrow.resolveDispute`)
+   * Record a dispute outcome from the appointed resolver.
    */
   async resolveDispute(
     tradeId: string,
@@ -1170,7 +1323,7 @@ export class TradeService {
     buyerSplitBps: number,
     resolutionNote: string
   ): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     if (trade.status !== "Disputed") {
@@ -1179,7 +1332,7 @@ export class TradeService {
 
     const actorLower = actor.trim().toLowerCase();
     if (actorLower !== trade.arbiter.toLowerCase()) {
-      throw new Error("Only the appointed Neutral Arbiter can issue a binding dispute resolution.");
+      throw new Error("Only the appointed dispute resolver can record an outcome.");
     }
 
     if (actorLower === trade.buyer.toLowerCase() || actorLower === trade.seller.toLowerCase()) {
@@ -1208,12 +1361,12 @@ export class TradeService {
       const mem = await walrusMemory.remember({
         tradeId: trade.id,
         tradeRef: trade.reference,
-        title: `Arbitral Ruling (${buyerPct}% Buyer / ${sellerPct}% Seller) — ${trade.reference}`,
+        title: `Dispute outcome recorded (${buyerPct}% Buyer / ${sellerPct}% Seller) — ${trade.reference}`,
         category: "Disputes",
         type: "DISPUTE_RESOLUTION",
         actor: actorLower,
         sourceRole: "arbiter",
-        content: `Neutral Arbiter ${actorLower} resolved dispute for ${trade.reference}: ${buyerPct}% to Buyer (${trade.buyer}), ${sellerPct}% to Seller (${trade.seller}). Ruling: "${resolutionNote}".`,
+        content: `Dispute outcome for ${trade.reference} recorded by the appointed resolver: ${buyerPct}% to Buyer (${trade.buyer}), ${sellerPct}% to Seller (${trade.seller}). Note: "${resolutionNote}". This record does not transfer funds.`,
         structuredPayload: {
           arbiter: actorLower,
           buyerSplitBps,
@@ -1232,17 +1385,17 @@ export class TradeService {
       trade.activity.push({
         id: `act-${Date.now()}-res`,
         type: "DISPUTE_RESOLVED",
-        title: `Dispute Resolved by Neutral Arbiter (${buyerPct}% Buyer / ${sellerPct}% Seller)`,
-        description: `Arbiter ${actorLower.slice(0, 6)}...${actorLower.slice(-4)} resolved the dispute: "${resolutionNote}".`,
+        title: `Dispute outcome recorded (${buyerPct}% Buyer / ${sellerPct}% Seller)`,
+        description: `The appointed resolver recorded an outcome: "${resolutionNote}". This action does not move funds.`,
         actor: actorLower,
         timestamp: nowIso,
         walrusMemoryId: mem.id,
       });
-    } catch (err: any) {
-      console.warn("[TradeStore] Walrus anchor notice:", err.message);
+    } catch (err: unknown) {
+      console.warn("[TradeStore] Walrus anchor notice:", errorMessage(err));
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
@@ -1250,7 +1403,7 @@ export class TradeService {
    * Voluntary seller refund or post-expiration buyer refund
    */
   async refundTrade(tradeId: string, actor: string, refundTxHash?: string): Promise<Trade> {
-    const trade = this.getTrade(tradeId);
+    const trade = await this.getTrade(tradeId);
     if (!trade) throw new Error("Trade not found");
 
     const actorLower = actor.trim().toLowerCase();
@@ -1266,19 +1419,19 @@ export class TradeService {
     }
 
     trade.status = "Refunded";
-    trade.refundTxHash = refundTxHash || trade.txHash;
+    trade.refundTxHash = refundTxHash;
     trade.updatedAt = new Date().toISOString();
 
     try {
       const mem = await walrusMemory.remember({
         tradeId: trade.id,
         tradeRef: trade.reference,
-        title: `Principal Refunded to Buyer — ${trade.reference}`,
+        title: `Refund Recorded — ${trade.reference}`,
         category: "Settlement",
         type: "SETTLEMENT_REFUNDED",
         actor: actorLower,
         sourceRole: isSeller ? "seller" : isArbiter ? "arbiter" : "buyer",
-        content: `Trade ${trade.reference} refunded: ${trade.amount} ${trade.asset} returned to Buyer ${trade.buyer} (triggered by ${actorLower}).`,
+        content: `A refund outcome for ${trade.reference} was recorded in Accord by ${actorLower}. This record does not confirm that ${trade.amount} ${trade.asset} was transferred to Buyer ${trade.buyer}.`,
         structuredPayload: {
           outcome: "REFUNDED",
           amount: trade.amount,
@@ -1299,102 +1452,23 @@ export class TradeService {
 
       trade.activity.push({
         id: `act-${Date.now()}-ref`,
-        type: "FUNDS_REFUNDED",
-        title: "Escrow Refunded to Buyer",
-        description: `${trade.amount} ${trade.asset} refunded to Buyer ${trade.buyer.slice(0, 6)}...${trade.buyer.slice(-4)} (authorized by ${actorLower.slice(0, 6)}...${actorLower.slice(-4)}).`,
+        type: "REFUND_RECORDED",
+        title: "Refund outcome recorded",
+        description: "Accord recorded a refund outcome. This action does not move funds.",
         actor: actorLower,
         timestamp: trade.updatedAt,
         txHash: trade.refundTxHash,
         walrusMemoryId: mem.id,
       });
-    } catch (err: any) {
-      console.warn("[TradeStore] Walrus anchor notice:", err.message);
+    } catch (err: unknown) {
+      console.warn("[TradeStore] Walrus anchor notice:", errorMessage(err));
     }
 
-    persistTradesToDisk();
+    await persistTrade(trade);
     return trade;
   }
 
-  /**
-   * Seed initial showcase trades:
-   * 1. ACC-2026-8812: A real Base Mainnet trade ready for live Tatum RPC verification using real Base Mainnet tx 0x5e628c371187d00fc4be945623e25acdac3464545512b9c03002259d95887b6c.
-   * 2. ACC-2026-9041: A trade in AwaitingAcceptance state to demonstrate invitation links, versioned term amendments, and acceptance.
-   */
-  async seedInitialShowcaseTrades(): Promise<void> {
-    await walrusMemory.seedDemonstrationMemories();
-    if (TRADE_STORE.size > 0) return;
 
-    // Showcase Trade 1: Backed by a real Base Mainnet transaction that can be verified live via Tatum RPC
-    const trade1 = await this.createTrade({
-      id: "trade-base-mainnet-8812",
-      reference: "ACC-2026-8812",
-      creator: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-      creatorRole: "buyer",
-      buyer: "0xf5bdce6674389d937df8ad3363c10fc3fa060b75",
-      seller: "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
-      arbiter: "0x12c4E5496F5bAbE7F9159958742D2635B1a084c7",
-      asset: "ETH",
-      amount: "0.000371",
-      network: "base-mainnet",
-      sampleVerifiableTxHash:
-        "0x5e628c371187d00fc4be945623e25acdac3464545512b9c03002259d95887b6c",
-      agreedTerms:
-        "Buyer transfers 0.000371 ETH on Base Mainnet (verifiable via Tatum RPC). Seller delivers cryptographically signed API access bundle and SHA-256 checksum within 2 hours of block confirmation.",
-      conditions: [
-        {
-          title: "Base Mainnet Deposit Receipt (Tatum RPC)",
-          description:
-            "On-chain verification of 0.000371 ETH transfer from Buyer 0xf5bd...0b75 on Base Mainnet with status 0x1.",
-          type: "onchain_receipt",
-        },
-        {
-          title: "Signed API Bundle Delivery (Off-Chain Attestation)",
-          description:
-            "Seller provides signed API license payload and anchors SHA-256 delivery receipt to Walrus Memory.",
-          type: "external_delivery",
-        },
-        {
-          title: "Buyer Key Validation & Inspection",
-          description:
-            "Buyer verifies API key signature before authorizing final settlement.",
-          type: "inspection",
-        },
-      ],
-      expirationHours: 72,
-    });
-
-    // Advance Showcase Trade 1 to AwaitingDeposit so user can immediately test live Tatum RPC verification
-    await this.acceptTerms(trade1.id, "0x0729e2a4716d9f7dd17858d5d504426d228697f7");
-
-    // Showcase Trade 2: Awaiting Counterparty Acceptance (to test invite review, term amendments, and acceptance)
-    await this.createTrade({
-      id: "trade-eth-domain-9041",
-      reference: "ACC-2026-9041",
-      creator: "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-      creatorRole: "buyer",
-      buyer: "0x71C83647249C0392B7e4136f1c7dC1a978641a96",
-      seller: "0x3d7b4A8911f4dF2309C8198542F559d873138b1E",
-      arbiter: "0x12c4E5496F5bAbE7F9159958742D2635B1a084c7",
-      asset: "ETH",
-      amount: "1.20",
-      network: "ethereum-mainnet",
-      agreedTerms:
-        "Buyer locks 1.20 ETH in AccordEscrow on Ethereum Mainnet. Seller transfers ENS domain ownership to Buyer address within 4 hours. Neutral arbiter resolves any transfer dispute.",
-      conditions: [
-        {
-          title: "Ethereum Mainnet Escrow Deposit (Tatum RPC)",
-          description: "Verify 1.20 ETH deposit transaction receipt with >= 12 block confirmations.",
-          type: "onchain_receipt",
-        },
-        {
-          title: "ENS Registrant Transfer Attestation",
-          description: "Seller attests domain transfer and provides transaction/registrant proof.",
-          type: "external_delivery",
-        },
-      ],
-      expirationHours: 48,
-    });
-  }
 }
 
 export const tradeService = new TradeService();

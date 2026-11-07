@@ -1,142 +1,121 @@
-# Accord — Trade on agreed terms.
+# Accord
 
-**Accord** is a peer-to-peer crypto trading coordination and settlement platform built for the **Tatum × Walrus Memory ("Total Recall") Hackathon**.
+**Trade on agreed terms.**
 
-Peer-to-peer crypto transactions often depend on blind trust, scattered Telegram/Discord messages, manual block explorer checks, and uncertainty about when each participant should act. **Accord** brings the versioned agreement, escrow authorization rules, live **Tatum RPC** on-chain verification, and persistent **Walrus Memory** context into a single shared trade room.
+Accord brings peer-to-peer trade agreements, wallet-approved actions, on-chain ETH escrow, payment verification, and a shared trade history into one workspace.
 
----
+## What Accord can do
 
-## Core Capabilities
+- Create a trade agreement between a buyer and seller, with an optional arbiter, an amount, terms, an expiry, and completion conditions.
+- Share a trade-room link so the other participant can review the agreement and accept it with their wallet.
+- Keep a versioned record of agreement terms and amendments.
+- Create an on-chain escrow after both participants accept the current terms.
+- Let the buyer deposit the exact agreed native ETH amount, the seller confirm fulfillment, and the buyer release the escrow.
+- Record refunds and disputes, collect supporting notes, and support arbiter or mutual settlement flows.
+- Verify escrow transactions against the configured network, contract, trade participants, amount, and contract events before updating the trade record.
+- Keep shared trade records in Supabase for hosted use.
+- Save, search, and retry persisted trade-memory records through Walrus Memory when configured.
+- Answer trade-room questions using saved trade details, memory records, and transaction verification results.
+- Inspect EVM network RPC connectivity and transaction receipts in the Tatum diagnostics page.
 
-1. **Create a Trade & Counterparty Invitation Flow (`/trades/new`)**
-   - Generate a unique trade reference (`ACC-YYYY-XXXX`), specify asset & amount, designate Buyer, Seller, and an independent **Neutral Arbiter**, select the EVM settlement network, and define agreed terms and settlement conditions.
-   - Generates a shareable invitation link (`/trade/ACC-...`) for the counterparty.
-   - **Transparent Term Versioning**: Any amendment to the agreed terms before deposit creates a new numbered `TermsVersion` with its own SHA-256 `termsHash` and automatically resets counterparty acceptance (`AwaitingAcceptance`)—changes never silently overwrite previously accepted terms.
+Trade requirements such as delivery and inspection are recorded as participant attestations. Accord keeps them distinct from facts verified directly on-chain.
 
-2. **Shared Trade Room (`/trade/[id]`)**
-   - Displays trade participants, acceptance badges, versioned agreement history, "What Happens Next" action guidance, live Tatum RPC transaction receipt telemetry, settlement conditions checklist, chronological activity timeline, and cryptographic dispute evidence vault.
-   - Enforces a strict state machine: `Draft` → `AwaitingAcceptance` → `AwaitingDeposit` → `Funded` → `AwaitingConditions` → `ReadyForRelease` → `Completed` / `Disputed` / `Refunded` / `Expired`.
-   - **Never Falsely Marked Funded**: A frontend button alone can never mark a trade as `Funded` or `Completed`; moving to `Funded` requires a verified `0x1` transaction receipt from **Tatum RPC**.
+## EVM networks and assets
 
-3. **Real Transaction Security (`contracts/AccordEscrow.sol`)**
-   - Solidity `^0.8.20` smart contract implementing `createTrade`, `deposit`, `confirmFulfillment`, `approveRelease`, `refund`, `claimExpiredRefund`, `raiseDispute`, `resolveDispute`, `proposeMutualSettlement`, and `acceptMutualSettlement`.
-   - Protected by a reentrancy guard (`nonReentrant`), strict separation of duties (`arbiter != buyer && arbiter != seller`), and checks-effects-interactions payout ordering.
-   - **On-Chain vs. Off-Chain Clarity**: Accord explicitly distinguishes conditions verified on-chain via Tatum RPC (`onchain_receipt`) from off-chain deliverables (`external_delivery`, `inspection`), which are recorded as participant attestations anchored with SHA-256 evidence hashes.
-   - **Strict AI Boundary**: The Accord Context Assistant never authorizes fund releases, signs transactions, transfers funds, or decides disputes.
+Accord's escrow contract handles native ETH. EVM chain settings are:
 
-4. **Tatum RPC Gateway & AI Builder Integration (`lib/tatum/client.ts`, `/tatum-diagnostic`)**
-   - Server-side JSON-RPC integration with `https://<network>.gateway.tatum.io` across **Base Mainnet**, **Base Sepolia**, **Ethereum Mainnet**, and **Polygon Mainnet**.
-   - Executes `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_blockNumber`, and `eth_getBalance` to verify execution status (`0x1` vs `0x0`), confirmation depth, sender (`from`), recipient (`to`), and transferred value.
-   - Integrates **Tatum AI Builder (`https://ai.tatum.io`)** manifest and multi-chain RPC blueprints (Hackathon Requirement 6).
+| Network | Trade network ID | Chain ID | Explorer |
+|---|---|---:|---|
+| Base Sepolia | `base-sepolia` | 84532 | [BaseScan Sepolia](https://sepolia.basescan.org) |
+| Base | `base-mainnet` | 8453 | [BaseScan](https://basescan.org) |
+| Arbitrum One | `arbitrum-one` | 42161 | [Arbiscan](https://arbiscan.io) |
+| Ethereum Mainnet | `ethereum-mainnet` | 1 | [Etherscan](https://etherscan.io) |
 
-5. **Walrus Memory on Mainnet (`lib/walrus/memory.ts`, `/memory`)**
-   - Integrates the official `@mysten-incubation/memwal` SDK targeting the Walrus Memory Mainnet Relayer (`https://relayer.memory.walrus.xyz`, Sui Mainnet Package `0xe7c16fbea0560e7057e2bf7422feaa4fb313749fc69c9e9092fac7a33b81d7f5`).
-   - Persists structured trade memories (`TRADE_TERMS`, `TERMS_AMENDMENT`, `TRADE_ACCEPTANCE`, `ONCHAIN_VERIFICATION`, `CONDITION_UPDATE`, `DISPUTE_EVIDENCE`, `DISPUTE_RESOLUTION`, `SETTLEMENT_LESSON`, `USER_PREFERENCE`) under namespace `accord-trades`.
-   - **Epistemic Integrity**: Records are only marked `verifiedOnWalrus: true` when confirmed by the Mainnet Relayer. When `.env.local` credentials are not yet configured, Accord falls back to `@mysten-incubation/memwal`'s `MemWalMock` and transparently labels records `verifiedOnWalrus: false`.
+Use the network for which the Accord escrow contract address and server configuration are set. The public mainnet switch controls network visibility in the app, while the server-side mainnet switch controls trade creation and escrow actions.
 
-6. **Persistent Memory Context Assistant (`lib/assistant/accord-ai.ts`)**
-   - Recalls past counterparty trade outcomes and explicit user preferences when creating or managing a trade.
-   - Answers practical trade questions (*"What have both parties agreed to?"*, *"Has the deposit actually been confirmed?"*, *"Which condition remains outstanding?"*, *"What happened during our previous trade?"*, *"What evidence is needed to resolve this dispute?"*), explicitly separating `[Verified On-Chain via Tatum RPC]`, `[Walrus Memory Record]`, and `[Participant Claim / Attestation]`.
+## Create and complete a trade
 
----
+1. Open **New Trade** and connect the buyer or seller wallet that will create the agreement.
+2. Select the network, enter both participant wallet addresses, the amount, optional arbiter, expiry, terms, and completion conditions.
+3. Review the agreement and sign the wallet authorization.
+4. Share the generated trade-room link with the other participant.
+5. Both participants review the current terms and accept them with their wallets.
+6. The buyer creates the on-chain escrow and deposits the exact agreed amount.
+7. The seller confirms fulfillment. Participants record the agreement's off-chain conditions in the trade room.
+8. The buyer reviews the trade and releases the escrow when ready.
+9. Follow the on-chain transactions and the trade timeline in the room. Disputes can be recorded and resolved through an arbiter or a mutual settlement.
 
-## Architecture Overview
+## Run locally
 
-```text
-├── app/
-│   ├── page.tsx                        # Landing page & protocol overview
-│   ├── trades/page.tsx                 # Filterable P2P Trade Rooms directory
-│   ├── trades/new/page.tsx             # Create Trade flow + Walrus Memory counterparty recall
-│   ├── trade/[id]/page.tsx             # Shared Trade Room (terms, Tatum RPC verify, escrow, AI)
-│   ├── memory/page.tsx                 # Walrus Memory Mainnet Explorer & 12-Memory Seeder
-│   ├── tatum-diagnostic/page.tsx       # Tatum RPC Gateway & AI Builder Diagnostic Console
-│   └── api/
-│       ├── trades/route.ts             # GET list / POST create trade
-│       ├── trades/[id]/route.ts        # GET trade / PATCH accept, amend, condition, release, dispute
-│       ├── trades/[id]/verify/route.ts # POST Tatum RPC transaction receipt verification
-│       ├── memory/remember/route.ts    # POST write memory via @mysten-incubation/memwal
-│       ├── memory/recall/route.ts      # GET/POST semantic & metadata recall
-│       ├── memory/seed/route.ts        # GET/POST verify & sync 12+ trade memories
-│       ├── assistant/route.ts          # POST grounded context assistant Q&A
-│       └── tatum/diagnose/route.ts     # GET RPC telemetry / POST receipt inspector
-├── contracts/
-│   └── AccordEscrow.sol                # EVM Escrow smart contract (Solidity ^0.8.20)
-├── lib/
-│   ├── contracts/AccordEscrow.ts       # Contract ABI, state enum, and network addresses
-│   ├── tatum/client.ts                 # Tatum RPC Gateway verification client
-│   ├── tatum/ai-builder.ts             # Tatum AI Builder (ai.tatum.io) manifest client
-│   ├── walrus/memory.ts                # Walrus Memory Mainnet SDK (@mysten-incubation/memwal)
-│   ├── trades/store.ts                 # Audited trade state machine & versioned store
-│   └── assistant/accord-ai.ts          # Grounded Context Assistant engine
-├── scripts/
-│   └── verify-mainnet-memories.ts      # CLI verification for Tatum RPC & 12+ Walrus Memories
-└── test/
-    └── accord.test.ts                  # Automated test suite (node:test)
-```
+### Requirements
 
----
+- Node.js `>= 22.23.4`
+- pnpm `>= 10` (npm can also be used)
 
-## Getting Started
+### Install and configure
 
-### 1. Prerequisites
-- **Node.js** `>= 22.23.4`
-- **pnpm** `>= 10.x` (or `npm`)
-
-### 2. Install Dependencies
-```bash
+```powershell
 pnpm install
+Copy-Item .env.example .env.local
 ```
 
-### 3. Configure Environment Variables (`.env.local`)
-Copy `.env.example` to `.env.local` and supply your credentials:
+Configure integrations through the deployment's environment settings. The app uses wallet connections for participant approvals, Supabase for hosted shared trade records, Tatum for EVM transaction checks, and Walrus Memory for persistent trade context.
 
-```env
-# 1. Tatum API Key (Server-side only — https://dashboard.tatum.io)
-TATUM_API_KEY=your_tatum_api_key_here
+### Configure shared trade storage
 
-# 2. Walrus Memory Mainnet Credentials (https://memory.walrus.xyz)
-# Register a MemWalAccount on Sui Mainnet and paste your delegate Ed25519 private key & account object ID:
-MEMWAL_PRIVATE_KEY=your_ed25519_delegate_private_key_hex_or_suiprivkey
-MEMWAL_ACCOUNT_ID=0x_your_sui_memwal_account_object_id
-MEMWAL_SERVER_URL=https://relayer.memory.walrus.xyz
-MEMWAL_NAMESPACE=accord-trades
+Hosted deployments use Supabase Postgres:
 
-# 3. Optional Web3 WalletConnect Project ID
-NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=
+1. Create a Supabase project.
+2. Apply [`supabase/migrations/20261105190000_create_accord_trades.sql`](./supabase/migrations/20261105190000_create_accord_trades.sql) in the Supabase SQL Editor or with the Supabase CLI.
+3. Configure the Supabase project in the hosting provider's environment settings.
+4. Set the deployed app's canonical HTTPS origin for wallet authorization.
+5. Redeploy the application.
+
+Local development can use the configured local trade-storage fallback.
+
+### Start the app
+
+```powershell
+pnpm dev
 ```
 
-### 4. Run Tests, Verification Script & Development Server
+Open [http://localhost:3000](http://localhost:3000).
 
-```bash
-# Run the automated security & integration test suite (6 test suites)
+## Deploy an escrow contract
+
+The setup page at `/setup/base-sepolia` deploys the Accord escrow contract to Base Sepolia from a connected wallet. After the deployment confirms:
+
+1. Copy the contract address.
+2. Configure the contract address in the server environment.
+3. Restart or redeploy the app so the server uses the configured address.
+4. Confirm the deployment and transactions in BaseScan.
+
+For local contract development, use a disposable local EVM:
+
+```powershell
+# Terminal 1
+pnpm run chain:local
+
+# Terminal 2
+pnpm run deploy:local
+pnpm dev
+```
+
+The local chain uses chain ID `31337` and RPC URL `http://127.0.0.1:8545`.
+
+## Other pages
+
+- `/trades` — browse saved trade rooms.
+- `/trades/new` — create an agreement.
+- `/trade/<reference>` — review terms, accept, record conditions, manage escrow, and view trade activity.
+- `/memory` — browse, search, and retry saved trade-memory records.
+- `/tatum-diagnostic` — check RPC connectivity and inspect transaction receipts.
+
+## Development checks
+
+```powershell
 pnpm test
-
-# Run the live Tatum RPC & Walrus Memory verification CLI
-pnpm run verify-memories
-
-# Start the Next.js development server
-pnpm run dev
-
-# Build for production
-pnpm run build
+pnpm lint
+pnpm exec tsc --noEmit
+pnpm build
 ```
-
----
-
-## Supported Networks & Tatum RPC Verification
-
-| Network | Slug | Chain ID | Tatum Gateway Endpoint |
-| :--- | :--- | :--- | :--- |
-| **Base Mainnet** | `base-mainnet` | `8453` | `https://base-mainnet.gateway.tatum.io` |
-| **Base Sepolia** | `base-sepolia` | `84532` | `https://base-sepolia.gateway.tatum.io` |
-| **Ethereum Mainnet** | `ethereum-mainnet` | `1` | `https://ethereum-mainnet.gateway.tatum.io` |
-| **Polygon Mainnet** | `polygon-mainnet` | `137` | `https://polygon-mainnet.gateway.tatum.io` |
-
-- Showcase trade **`ACC-2026-8812`** comes pre-configured with a real, verifiable Base Mainnet transaction (`0x5e628c371187d00fc4be945623e25acdac3464545512b9c03002259d95887b6c`, mined in Block `#53221342`, `0.000371 ETH`) so you can test live Tatum RPC verification immediately in the Shared Trade Room.
-
----
-
-## Security Notes & Limitations
-
-- **On-Chain vs. Off-Chain Verification**: Tatum RPC cryptographically proves on-chain events (`0x1` receipt status, block confirmation depth, sender/recipient, and value). A blockchain cannot independently prove off-chain events such as physical parcel delivery or external API key validity; Accord labels those conditions as **Off-Chain Participant Attestations** and anchors their SHA-256 evidence hashes for neutral arbiter review.
-- **No Unilateral AI Authority**: Accord's Context Assistant retrieves persistent memories from Walrus Memory and live receipts from Tatum RPC to inform human participants, without retraining model weights or ever having authority to sign transactions, release escrow, or adjudicate disputes.

@@ -98,6 +98,9 @@ contract AccordEscrow {
     error DeadlineNotPassed();
     error TradeAlreadyExists();
     error TradeNotFound();
+    error InvalidTradeReference();
+    error InvalidTermsHash();
+    error InvalidFulfillmentProof();
     error NoActiveSettlementProposal();
     error TransferFailed();
 
@@ -110,6 +113,10 @@ contract AccordEscrow {
 
     constructor() {
         _status = _NOT_ENTERED;
+    }
+
+    function version() external pure returns (uint256) {
+        return 2;
     }
 
     function computeTradeId(string memory tradeRef, address buyer) public pure returns (bytes32) {
@@ -127,7 +134,9 @@ contract AccordEscrow {
         uint256 deadline,
         bytes32 termsHash
     ) external returns (bytes32 tradeId) {
+        if (bytes(tradeRef).length == 0) revert InvalidTradeReference();
         if (amount == 0) revert InvalidAmount();
+        if (termsHash == bytes32(0)) revert InvalidTermsHash();
         if (seller == address(0) || seller == msg.sender) revert InvalidParties();
         if (arbiter != address(0) && (arbiter == msg.sender || arbiter == seller)) {
             revert InvalidArbiter();
@@ -135,7 +144,9 @@ contract AccordEscrow {
         if (deadline <= block.timestamp) revert DeadlinePassed();
 
         tradeId = computeTradeId(tradeRef, msg.sender);
-        if (trades[tradeId].id != bytes32(0)) revert TradeAlreadyExists();
+        if (trades[tradeId].id != bytes32(0) || tradeRefToId[tradeRef] != bytes32(0)) {
+            revert TradeAlreadyExists();
+        }
 
         trades[tradeId] = Trade({
             id: tradeId,
@@ -186,6 +197,7 @@ contract AccordEscrow {
         if (trade.state != TradeState.Funded && trade.state != TradeState.AwaitingConditions) {
             revert InvalidState(trade.state, TradeState.Funded);
         }
+        if (fulfillmentProofHash == bytes32(0)) revert InvalidFulfillmentProof();
 
         trade.sellerApproved = true;
         trade.fulfillmentProofHash = fulfillmentProofHash;
@@ -201,7 +213,7 @@ contract AccordEscrow {
         Trade storage trade = trades[tradeId];
         if (trade.id == bytes32(0)) revert TradeNotFound();
         if (msg.sender != trade.buyer) revert Unauthorized();
-        if (trade.state != TradeState.Funded && trade.state != TradeState.ReadyForRelease) {
+        if (trade.state != TradeState.ReadyForRelease) {
             revert InvalidState(trade.state, TradeState.ReadyForRelease);
         }
 

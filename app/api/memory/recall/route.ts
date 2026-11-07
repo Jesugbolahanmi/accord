@@ -4,16 +4,13 @@ import { tradeService } from "@/lib/trades/store";
 
 export async function GET(request: Request) {
   try {
-    await tradeService.seedInitialShowcaseTrades();
-    await walrusMemory.seedDemonstrationMemories();
-
     const { searchParams } = new URL(request.url);
     const memoryId = searchParams.get("id");
 
     if (memoryId) {
       const detail = walrusMemory.getMemoryById(memoryId);
       const trade = detail.memory
-        ? tradeService.getTrade(detail.memory.tradeRef)
+        ? await tradeService.getTrade(detail.memory.tradeRef)
         : null;
       return NextResponse.json({
         success: true,
@@ -51,15 +48,16 @@ export async function GET(request: Request) {
     });
 
     return NextResponse.json({ success: true, ...result });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 500 }
+    );
   }
 }
 
 export async function POST(request: Request) {
   try {
-    await tradeService.seedInitialShowcaseTrades();
-    await walrusMemory.seedDemonstrationMemories();
     const body = await request.json();
 
     const result = await walrusMemory.searchMemories({
@@ -75,7 +73,10 @@ export async function POST(request: Request) {
     });
 
     return NextResponse.json({ success: true, ...result });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { success: false, error: err instanceof Error ? err.message : undefined },
+      { status: 500 }
+    );
   }
 }

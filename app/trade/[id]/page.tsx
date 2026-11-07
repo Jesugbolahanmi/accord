@@ -2,19 +2,72 @@
 
 import { useState, useEffect, use } from "react";
 import Link from "next/link";
-import { useAccount } from "wagmi";
+import {
+  useAccount,
+  usePublicClient,
+  useReadContract,
+  useSignTypedData,
+  useSwitchChain,
+  useWriteContract,
+} from "wagmi";
+import { keccak256, parseEther, stringToHex, zeroHash } from "viem";
 import {
   ArrowLeft,
   ArrowUpRight,
   Copy,
   Check,
   Send,
-  AlertCircle,
 } from "lucide-react";
+import type {
+  SettlementCondition,
+  TermsVersion,
+  Trade,
+  TradeActivity,
+} from "@/lib/trades/store";
+import type { VerificationResult } from "@/lib/tatum/client";
+import type { WalrusTradeMemory } from "@/lib/walrus/memory";
+import { ACCORD_ESCROW_ABI } from "@/lib/contracts/AccordEscrow";
+import {
+  createTradeActionTypedData,
+  getAuthorizedPayload,
+  getTradeActionChainId,
+} from "@/lib/trades/action-auth";
+import {
+  getEvmEscrowNetwork,
+  isEvmEscrowNetwork,
+} from "@/lib/contracts/escrow-networks";
+
+interface TradeRoomResponse {
+  success?: boolean;
+  trade?: Trade;
+  memories?: WalrusTradeMemory[];
+  error?: string;
+}
+
+interface VerificationResponse extends TradeRoomResponse {
+  verified?: boolean;
+  message?: string;
+  verification?: VerificationResult;
+}
+
+interface AssistantResponse {
+  question?: string;
+  answer: string;
+  engineMode?: string;
+  verifiedFacts?: string[];
+  userClaims?: string[];
+}
+
+type TradeActionPayload = Record<string, unknown> & { action: string };
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "An unexpected error occurred.";
+}
 
 const EXPLORER_MAP: Record<string, string> = {
   "base-mainnet": "https://basescan.org",
   "base-sepolia": "https://sepolia.basescan.org",
+  "arbitrum-one": "https://arbiscan.io",
   "ethereum-mainnet": "https://etherscan.io",
   "polygon-mainnet": "https://polygonscan.com",
 };
@@ -27,6 +80,18 @@ const PRACTICAL_QUESTIONS = [
   "What evidence is needed to resolve this dispute?",
 ];
 
+const STATUS_LABELS: Record<string, string> = {
+  AwaitingAcceptance: "Waiting for agreement",
+  AwaitingDeposit: "Waiting for payment",
+  Funded: "Payment check passed",
+  AwaitingConditions: "Waiting for requirements",
+  ReadyForRelease: "Ready to finish",
+  Completed: "Trade marked complete",
+  Disputed: "Disagreement raised",
+  Refunded: "Refund recorded",
+  Expired: "Expired",
+};
+
 export default function SharedTradeRoomPage({
   params,
 }: {
@@ -34,9 +99,16 @@ export default function SharedTradeRoomPage({
 }) {
   const { id } = use(params);
   const { address: connectedWallet } = useAccount();
+  const { switchChainAsync } = useSwitchChain();
+  const { signTypedDataAsync } = useSignTypedData();
+  const { writeContractAsync } = useWriteContract();
 
-  const [trade, setTrade] = useState<any | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [trade, setTrade] = useState<Trade | null>(null);
+  const [loadedTradeId, setLoadedTradeId] = useState<string | null>(null);
+  const escrowNetwork = trade ? getEvmEscrowNetwork(trade.network) : undefined;
+  const escrowChainId = escrowNetwork?.chainId;
+  const publicClient = usePublicClient({ chainId: escrowChainId });
+  const loading = loadedTradeId !== id;
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{
     type: "success" | "error";
@@ -67,114 +139,425 @@ export default function SharedTradeRoomPage({
 
   // Context Assistant state
   const [assistantQuestion, setAssistantQuestion] = useState("");
-  const [assistantResponse, setAssistantResponse] = useState<any | null>(null);
+  const [assistantResponse, setAssistantResponse] = useState<AssistantResponse | null>(null);
   const [askingAssistant, setAskingAssistant] = useState(false);
 
   // Trade Memory Box records
-  const [tradeMemories, setTradeMemories] = useState<any[]>([]);
+  const [tradeMemories, setTradeMemories] = useState<WalrusTradeMemory[]>([]);
   const [selectedMemoryCategory, setSelectedMemoryCategory] = useState<string>("ALL");
-
-  const loadTradeRoom = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/trades/${encodeURIComponent(id)}`);
-      const data = await res.json();
-      if (data.success && data.trade) {
-        setTrade(data.trade);
-        if (Array.isArray(data.memories)) {
-          setTradeMemories(data.memories);
-        }
-        setAmendedTermsText(data.trade.agreedTerms || "");
-        if (!txHashInput && data.trade.txHash) {
-          setTxHashInput(data.trade.txHash);
-        } else if (!txHashInput && data.trade.sampleVerifiableTxHash) {
-          setTxHashInput(data.trade.sampleVerifiableTxHash);
-        }
-        if (!activeActor) {
-          if (
-            connectedWallet &&
-            (connectedWallet.toLowerCase() === data.trade.buyer.toLowerCase() ||
-              connectedWallet.toLowerCase() === data.trade.seller.toLowerCase() ||
-              connectedWallet.toLowerCase() === data.trade.arbiter.toLowerCase())
-          ) {
-            setActiveActor(connectedWallet.toLowerCase());
-          } else if (!data.trade.sellerAccepted) {
-            setActiveActor(data.trade.seller);
-          } else {
-            setActiveActor(data.trade.buyer);
-          }
-        }
-      }
-    } catch (err) {
-      console.error("Error loading trade room:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [escrowActionLoading, setEscrowActionLoading] = useState<string | null>(null);
 
   useEffect(() => {
-    loadTradeRoom();
-  }, [id]);
+    let active = true;
+    const loadTradeRoom = async () => {
+      try {
+        const res = await fetch(`/api/trades/${encodeURIComponent(id)}`);
+        const data = (await res.json()) as TradeRoomResponse;
+        const loadedTrade = data.trade;
+        if (active && data.success && loadedTrade) {
+          setTrade(loadedTrade);
+          if (Array.isArray(data.memories)) {
+            setTradeMemories(data.memories);
+          }
+          setAmendedTermsText(loadedTrade.agreedTerms || "");
+          const defaultTxHash = loadedTrade.txHash;
+          if (defaultTxHash) {
+            setTxHashInput((current) => current || defaultTxHash);
+          }
+          setActiveActor((current) => {
+            if (current) return current;
+            if (
+              connectedWallet &&
+              (connectedWallet.toLowerCase() === loadedTrade.buyer.toLowerCase() ||
+                connectedWallet.toLowerCase() === loadedTrade.seller.toLowerCase() ||
+                connectedWallet.toLowerCase() === loadedTrade.arbiter.toLowerCase())
+            ) {
+              return connectedWallet.toLowerCase();
+            } else if (!loadedTrade.sellerAccepted) {
+              return loadedTrade.seller;
+            }
+            return loadedTrade.buyer;
+          });
+        }
+      } catch (err: unknown) {
+        if (active) console.error("Error loading trade room:", err);
+      } finally {
+        if (active) setLoadedTradeId(id);
+      }
+    };
+    void loadTradeRoom();
+    return () => {
+      active = false;
+    };
+  }, [id, connectedWallet]);
 
-  const runTradeAction = async (payload: Record<string, any>, successNotice: string) => {
+  const escrowAddress =
+    trade &&
+    escrowNetwork &&
+    trade.asset === "ETH" &&
+    trade.escrowAddress &&
+    /^0x[a-fA-F0-9]{40}$/.test(trade.escrowAddress)
+      ? (trade.escrowAddress as `0x${string}`)
+      : undefined;
+  const {
+    data: onChainTradeId,
+    isLoading: isLoadingOnChainTradeId,
+    refetch: refetchTradeId,
+  } = useReadContract({
+    address: escrowAddress,
+    abi: ACCORD_ESCROW_ABI,
+    functionName: "tradeRefToId",
+    args: trade ? [trade.reference] : undefined,
+    chainId: escrowChainId,
+    query: { enabled: Boolean(escrowAddress && trade) },
+  });
+  const { data: escrowVersion, isPending: isLoadingEscrowVersion } = useReadContract({
+    address: escrowAddress,
+    abi: ACCORD_ESCROW_ABI,
+    functionName: "version",
+    chainId: escrowChainId,
+    query: { enabled: Boolean(escrowAddress) },
+  });
+  const isSupportedEscrow = escrowVersion === BigInt(2);
+  const hasOnChainTrade = Boolean(onChainTradeId && onChainTradeId !== zeroHash);
+  const { data: onChainTrade, refetch: refetchOnChainTrade } = useReadContract({
+    address: escrowAddress,
+    abi: ACCORD_ESCROW_ABI,
+    functionName: "getTrade",
+    args: hasOnChainTrade && onChainTradeId ? [onChainTradeId] : undefined,
+    chainId: escrowChainId,
+    query: { enabled: Boolean(escrowAddress && hasOnChainTrade && onChainTradeId) },
+  });
+  const chainTradeState = onChainTrade?.state;
+
+  const runTradeAction = async (payload: TradeActionPayload, successNotice: string) => {
+    if (!trade) return;
+    const currentTrade = trade;
     setFeedback(null);
+    const actionActor =
+      typeof payload.actor === "string" ? payload.actor.toLowerCase() : "";
+    if (
+      currentTrade.settlementMode === "escrow" &&
+      (!connectedWallet || connectedWallet.toLowerCase() !== actionActor)
+    ) {
+      setFeedback({
+        type: "error",
+        message: "Connect the wallet for the selected participant before recording this action.",
+      });
+      return;
+    }
+    if (
+      !isEvmEscrowNetwork(currentTrade.network) ||
+      !connectedWallet ||
+      connectedWallet.toLowerCase() !== actionActor
+    ) {
+      setFeedback({
+        type: "error",
+        message: `Connect the participant wallet on ${escrowNetwork?.name || "the trade network"} before signing this action.`,
+      });
+      return;
+    }
+
+    const chainId = getTradeActionChainId(currentTrade.network);
+    const expectedUpdatedAt = Date.parse(currentTrade.updatedAt);
+    if (!chainId || !Number.isSafeInteger(expectedUpdatedAt) || expectedUpdatedAt <= 0) {
+      setFeedback({ type: "error", message: "This trade cannot be safely authorized." });
+      return;
+    }
+
     setActionLoading(payload.action);
     try {
-      const res = await fetch(`/api/trades/${encodeURIComponent(trade.id)}`, {
+      await switchChainAsync({ chainId });
+      const issuedAt = BigInt(Math.floor(Date.now() / 1000));
+      const expiresAt = issuedAt + BigInt(300);
+      const unsignedPayload = getAuthorizedPayload(payload);
+      const typedData = createTradeActionTypedData({
+        origin: window.location.origin,
+        tradeReference: currentTrade.reference,
+        payload: unsignedPayload,
+        expectedUpdatedAt: BigInt(expectedUpdatedAt),
+        issuedAt,
+        expiresAt,
+        chainId,
+      });
+      const signature = await signTypedDataAsync(typedData);
+      const res = await fetch(`/api/trades/${encodeURIComponent(currentTrade.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          ...payload,
+          actor: connectedWallet,
+          authorization: {
+            signature,
+            issuedAt: issuedAt.toString(),
+            expiresAt: expiresAt.toString(),
+            expectedUpdatedAt: expectedUpdatedAt.toString(),
+          },
+        }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as TradeRoomResponse;
       if (!res.ok || !data.success) {
         throw new Error(data.error || "Operation failed");
       }
+      if (!data.trade) throw new Error("The updated trade was not returned.");
       setTrade(data.trade);
       if (Array.isArray(data.memories)) {
         setTradeMemories(data.memories);
       }
       setFeedback({ type: "success", message: successNotice });
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message });
+    } catch (err: unknown) {
+      setFeedback({ type: "error", message: getErrorMessage(err) });
     } finally {
       setActionLoading(null);
     }
   };
 
+  const submitEscrowTransaction = async (
+    action: string,
+    functionName:
+      | "createTrade"
+      | "deposit"
+      | "confirmFulfillment"
+      | "approveRelease"
+      | "refund"
+      | "claimExpiredRefund",
+    args: readonly unknown[],
+    value?: bigint
+  ) => {
+    if (!trade || !escrowAddress || !connectedWallet) return;
+    setFeedback(null);
+    if (!isSupportedEscrow) {
+      setFeedback({
+        type: "error",
+        message: "This escrow contract is outdated. Deploy and configure version 2 before submitting escrow actions.",
+      });
+      return;
+    }
+    setEscrowActionLoading(action);
+    try {
+      if (!connectedWallet) throw new Error("Connect the participant wallet first.");
+      if (!publicClient || !escrowChainId || !escrowNetwork) {
+        throw new Error("The escrow network RPC is unavailable.");
+      }
+      await switchChainAsync({ chainId: escrowChainId });
+      const hash = await writeContractAsync({
+        address: escrowAddress,
+        abi: ACCORD_ESCROW_ABI,
+        functionName,
+        args,
+        account: connectedWallet,
+        chainId: escrowChainId,
+        ...(value === undefined ? {} : { value }),
+      } as Parameters<typeof writeContractAsync>[0]);
+      setFeedback({
+        type: "success",
+        message: `Transaction submitted: ${hash}. Waiting for ${escrowNetwork.name} confirmation…`,
+      });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") {
+        throw new Error(`The escrow transaction reverted on ${escrowNetwork.name}.`);
+      }
+      await refetchTradeId();
+      await refetchOnChainTrade();
+      setFeedback({
+        type: "success",
+        message: `Escrow transaction confirmed on ${escrowNetwork.name}: ${hash}`,
+      });
+      return hash;
+    } catch (error) {
+      setFeedback({ type: "error", message: getErrorMessage(error) });
+      return undefined;
+    } finally {
+      setEscrowActionLoading(null);
+    }
+  };
+
+  const handleCreateOnChainTrade = async () => {
+    if (!trade || !escrowAddress || !connectedWallet) return;
+    if (connectedWallet.toLowerCase() !== trade.buyer.toLowerCase()) {
+      setFeedback({ type: "error", message: "Connect the designated buyer wallet to create escrow." });
+      return;
+    }
+    if (!trade.buyerAccepted || !trade.sellerAccepted) {
+      setFeedback({ type: "error", message: "Both participants must accept the terms before escrow is created." });
+      return;
+    }
+    if (trade.status !== "AwaitingDeposit") {
+      setFeedback({ type: "error", message: "This agreement is not ready for escrow creation." });
+      return;
+    }
+    if (hasOnChainTrade) {
+      setFeedback({ type: "error", message: "An on-chain escrow already exists for this trade reference." });
+      return;
+    }
+
+    await submitEscrowTransaction(
+      "createTrade",
+      "createTrade",
+      [
+        trade.reference,
+        trade.seller as `0x${string}`,
+        trade.arbiter as `0x${string}`,
+        parseEther(trade.amount),
+        BigInt(Math.floor(trade.expirationTimestamp / 1000)),
+        trade.termsHash as `0x${string}`,
+      ]
+    );
+  };
+
+  const handleEscrowDeposit = async () => {
+    if (!trade || !onChainTradeId || !connectedWallet) return;
+    if (connectedWallet.toLowerCase() !== trade.buyer.toLowerCase()) {
+      setFeedback({ type: "error", message: "Only the designated buyer wallet can deposit into this escrow." });
+      return;
+    }
+    if (chainTradeState !== 2) {
+      setFeedback({ type: "error", message: "The on-chain escrow is not awaiting a deposit." });
+      return;
+    }
+    await submitEscrowTransaction("deposit", "deposit", [onChainTradeId], parseEther(trade.amount));
+  };
+
+  const handleEscrowFulfillment = async () => {
+    if (!trade || !onChainTradeId || !connectedWallet) return;
+    if (connectedWallet.toLowerCase() !== trade.seller.toLowerCase()) {
+      setFeedback({ type: "error", message: "Connect the designated seller wallet to confirm fulfillment." });
+      return;
+    }
+    const fulfillmentProofHash = keccak256(
+      stringToHex(
+        JSON.stringify({
+          termsHash: trade.termsHash,
+          conditions: trade.conditions.map((condition) => [
+            condition.id,
+            condition.completed,
+            condition.completedAt || "",
+            condition.completedBy || "",
+            condition.evidenceHash || "",
+            condition.txHash || "",
+          ]),
+        })
+      )
+    );
+    const hash = await submitEscrowTransaction(
+      "confirmFulfillment",
+      "confirmFulfillment",
+      [onChainTradeId, fulfillmentProofHash]
+    );
+    if (hash) {
+      await runTradeAction(
+        { action: "confirm_fulfillment", actor: connectedWallet, txHash: hash },
+        "Seller fulfillment was confirmed on-chain and recorded in Accord."
+      );
+    }
+  };
+
+  const handleEscrowRelease = async () => {
+    if (!trade || !onChainTradeId || !connectedWallet) return;
+    if (connectedWallet.toLowerCase() !== trade.buyer.toLowerCase()) {
+      setFeedback({ type: "error", message: "Connect the designated buyer wallet to release escrow." });
+      return;
+    }
+    const hash = await submitEscrowTransaction(
+      "approveRelease",
+      "approveRelease",
+      [onChainTradeId]
+    );
+    if (hash) {
+      await runTradeAction(
+        { action: "approve_release", actor: connectedWallet, txHash: hash },
+        `Escrow release confirmed on ${escrowNetwork?.name || "the network"}.`
+      );
+    }
+  };
+
+  const handleEscrowRefund = async () => {
+    if (!trade || !onChainTradeId || !connectedWallet) return;
+    if (connectedWallet.toLowerCase() !== trade.seller.toLowerCase()) {
+      setFeedback({ type: "error", message: "Connect the designated seller wallet to request a refund." });
+      return;
+    }
+    const hash = await submitEscrowTransaction("refund", "refund", [onChainTradeId]);
+    if (hash) {
+      await runTradeAction(
+        { action: "refund", actor: connectedWallet, txHash: hash },
+        `Seller refund confirmed on ${escrowNetwork?.name || "the network"}.`
+      );
+    }
+  };
+
   const handleVerifyDepositWithTatum = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!txHashInput.trim()) return;
+    if (!trade || !txHashInput.trim()) return;
+    if (
+      !connectedWallet ||
+      connectedWallet.toLowerCase() !== trade.buyer.toLowerCase() ||
+      !isEvmEscrowNetwork(trade.network) ||
+      trade.asset !== "ETH"
+    ) {
+      setFeedback({ type: "error", message: "Connect the designated buyer wallet on the trade network to verify the escrow deposit." });
+      return;
+    }
+    const currentTrade = trade;
     setFeedback(null);
     setVerifyingTx(true);
 
     try {
-      const res = await fetch(`/api/trades/${encodeURIComponent(trade.id)}/verify`, {
+      const chainId = getTradeActionChainId(currentTrade.network);
+      const expectedUpdatedAt = Date.parse(currentTrade.updatedAt);
+      if (!chainId || !Number.isSafeInteger(expectedUpdatedAt) || expectedUpdatedAt <= 0) {
+        throw new Error("This trade cannot be safely authorized.");
+      }
+      await switchChainAsync({ chainId });
+      const issuedAt = BigInt(Math.floor(Date.now() / 1000));
+      const expiresAt = issuedAt + BigInt(300);
+      const payload = {
+        action: "verify_deposit",
+        txHash: txHashInput.trim(),
+        network: currentTrade.network,
+      };
+      const typedData = createTradeActionTypedData({
+        origin: window.location.origin,
+        tradeReference: currentTrade.reference,
+        payload,
+        expectedUpdatedAt: BigInt(expectedUpdatedAt),
+        issuedAt,
+        expiresAt,
+        chainId,
+      });
+      const signature = await signTypedDataAsync(typedData);
+      const res = await fetch(`/api/trades/${encodeURIComponent(currentTrade.id)}/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          txHash: txHashInput.trim(),
-          network: trade.network,
-          actor: activeActor || trade.buyer,
+          ...payload,
+          actor: connectedWallet,
+          authorization: {
+            signature,
+            issuedAt: issuedAt.toString(),
+            expiresAt: expiresAt.toString(),
+            expectedUpdatedAt: expectedUpdatedAt.toString(),
+          },
         }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as VerificationResponse;
       if (data.trade) {
         setTrade(data.trade);
       }
       if (Array.isArray(data.memories)) {
         setTradeMemories(data.memories);
       }
-      if (!res.ok || !data.verified) {
+      if (!res.ok || !data.verified || !data.verification) {
         throw new Error(
           data.message || data.error || "Tatum RPC could not verify this transaction receipt."
         );
       }
       setFeedback({
         type: "success",
-        message: `Verified via Tatum RPC: Block #${data.verification.blockNumber} (${data.verification.confirmations} confirmations) on ${trade.network}.`,
+        message: `Verified via Tatum RPC: Block #${data.verification.blockNumber} (${data.verification.confirmations} confirmations) on ${currentTrade.network}.`,
       });
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message });
+    } catch (err: unknown) {
+      setFeedback({ type: "error", message: getErrorMessage(err) });
     } finally {
       setVerifyingTx(false);
     }
@@ -183,6 +566,7 @@ export default function SharedTradeRoomPage({
   const askContextAssistant = async (questionText: string) => {
     const trimmed = questionText.trim();
     if (!trimmed || !trade) return;
+    const currentTrade = trade;
     setAskingAssistant(true);
     try {
       const res = await fetch("/api/assistant", {
@@ -190,16 +574,28 @@ export default function SharedTradeRoomPage({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: trimmed,
-          tradeId: trade.id,
-          tradeRef: trade.reference,
-          currentUser: activeActor || trade.buyer,
-          txHash: trade.txHash || undefined,
-          clientTradeSnapshot: trade,
+          tradeId: currentTrade.id,
+          tradeRef: currentTrade.reference,
+          currentUser: activeActor || currentTrade.buyer,
+          txHash: currentTrade.txHash || undefined,
+          clientTradeSnapshot: currentTrade,
         }),
       });
-      const data = await res.json();
-      if (data.success) {
-        setAssistantResponse({ ...data, question: data.question || trimmed });
+      const data = (await res.json()) as {
+        success?: boolean;
+        question?: string;
+        answer?: string;
+        engineMode?: string;
+        verifiedFacts?: string[];
+        userClaims?: string[];
+        error?: string;
+      };
+      if (data.success && typeof data.answer === "string") {
+        setAssistantResponse({
+          ...data,
+          answer: data.answer,
+          question: data.question || trimmed,
+        });
         setAssistantQuestion("");
       } else {
         setAssistantResponse({
@@ -209,10 +605,10 @@ export default function SharedTradeRoomPage({
           userClaims: [],
         });
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       setAssistantResponse({
         question: trimmed,
-        answer: `Assistant connection error: ${err?.message || "Failed to reach /api/assistant"}`,
+        answer: `Assistant connection error: ${getErrorMessage(err)}`,
         verifiedFacts: [],
         userClaims: [],
       });
@@ -276,23 +672,23 @@ export default function SharedTradeRoomPage({
     switch (trade.status) {
       case "AwaitingAcceptance":
         return !trade.sellerAccepted
-          ? `Seller (${trade.seller.slice(0, 8)}…) must review and sign Version ${latestVersion} terms.`
-          : `Buyer (${trade.buyer.slice(0, 8)}…) must review and sign Version ${latestVersion} terms.`;
+          ? `The seller should review and accept version ${latestVersion} of the terms.`
+          : `The buyer should review and accept version ${latestVersion} of the terms.`;
       case "AwaitingDeposit":
-        return `Buyer (${trade.buyer.slice(0, 8)}…) transfers ${trade.amount} ${trade.asset} on ${trade.network} and verifies the tx hash via Tatum RPC.`;
+        return "The buyer can submit a transaction ID for a payment check. Accord does not execute payment transactions or hold funds.";
       case "Funded":
       case "AwaitingConditions":
-        return `Complete and attest outstanding settlement conditions (${
-          trade.conditions.filter((c: any) => !c.completed).length
-        } remaining).`;
+        return `Complete the remaining trade requirements (${
+          trade.conditions.filter((condition: SettlementCondition) => !condition.completed).length
+        } left).`;
       case "ReadyForRelease":
-        return `All conditions satisfied. Buyer (${trade.buyer.slice(0, 8)}…) can now authorize final settlement release.`;
+        return "The requirements are complete. The buyer can review the trade and take the next action shown below.";
       case "Disputed":
-        return `Dispute active. Neutral Arbiter (${trade.arbiter.slice(0, 8)}…) reviews SHA-256 evidence and executes split/refund ruling.`;
+        return "A disagreement has been recorded. Follow the resolution steps shown in this trade room.";
       case "Completed":
-        return `Trade settled. ${trade.amount} ${trade.asset} released to Seller (${trade.seller.slice(0, 8)}…).`;
+        return "Accord has marked this trade complete. This status update does not send or release funds.";
       case "Refunded":
-        return `Principal refunded to Buyer (${trade.buyer.slice(0, 8)}…).`;
+        return "A refund outcome has been recorded in Accord. This status does not confirm that funds were returned.";
       default:
         return `Current state: ${trade.status}`;
     }
@@ -306,7 +702,7 @@ export default function SharedTradeRoomPage({
           <Link
             href="/trades"
             className="p-2 rounded-[3px] bg-[#0E1014] hover:bg-[#13161C] border border-white/[0.1] text-[#A6A39B] hover:text-[#F4F2ED] transition-colors mt-0.5 sm:mt-0"
-            title="Back to Agreements"
+            title="Back to trades"
           >
             <ArrowLeft className="w-4 h-4" />
           </Link>
@@ -324,16 +720,16 @@ export default function SharedTradeRoomPage({
                     : "status-pill-brass"
                 }`}
               >
-                {trade.status}
+                {STATUS_LABELS[trade.status] || trade.status}
               </span>
               <span className="status-pill">
                 {trade.settlementMode === "escrow"
-                  ? "Contract Escrow"
-                  : "Direct Verified Settlement"}
+                  ? "Escrow contract available · wallet approval required"
+                  : "Direct payment · not sent by Accord"}
               </span>
             </div>
             <h1 className="font-editorial text-[26px] sm:text-[32px] leading-tight text-[#F4F2ED] mt-1">
-              {trade.amount} {trade.asset} Settlement Instrument
+              {trade.amount} {trade.asset} trade
             </h1>
           </div>
         </div>
@@ -363,7 +759,7 @@ export default function SharedTradeRoomPage({
             aria-label="Active participant role"
             className="inline-flex items-center bg-[#0E1014] border border-white/[0.1] rounded-[3px] p-0.5 font-mono-tabular text-[11px]"
           >
-            <span className="px-2 text-[#6E6C65] hidden sm:inline">View as:</span>
+            <span className="px-2 text-[#6E6C65] hidden sm:inline">Preview role:</span>
             <button
               type="button"
               onClick={() => setActiveActor(trade.buyer)}
@@ -401,11 +797,22 @@ export default function SharedTradeRoomPage({
         </div>
       </div>
 
+      <div
+        role="note"
+        className="rounded-[3px] border border-[#C88A32]/35 bg-[#C88A32]/[0.07] px-4 py-3 text-[12px] leading-relaxed text-[#DEC392]"
+      >
+        {escrowNetwork?.testnet
+          ? "Testnet only. Escrow controls submit wallet-approved test transactions. Agreement acceptance, delivery conditions, and dispute notes remain app records; never use testnet for real funds."
+          : escrowNetwork
+            ? "Mainnet uses real funds. This prototype has not had an independent security audit. Do not deposit funds unless the deployment has been independently audited and approved."
+            : "This network does not have an enabled Accord escrow implementation."}
+      </div>
+
       {/* Executive Summary Ledger Strip (4 Columns) */}
       <div className="surface-panel rounded-[4px] grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07]">
         <div className="p-4 sm:p-5">
           <div className="text-[10px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
-            Principal &amp; Network
+            Trade amount &amp; network
           </div>
           <div className="mt-1 font-mono-tabular text-[20px] font-medium text-[#F4F2ED]">
             {trade.amount} <span className="text-[13px] text-[#A6A39B]">{trade.asset}</span>
@@ -417,19 +824,19 @@ export default function SharedTradeRoomPage({
 
         <div className="p-4 sm:p-5">
           <div className="text-[10px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
-            Bilateral Signatures (v{latestVersion})
+            Agreement status · Version {latestVersion}
           </div>
           <div className="mt-1.5 space-y-1 font-mono-tabular text-[12px]">
             <div className="flex items-center justify-between">
               <span className="text-[#A6A39B]">Buyer ({trade.buyer.slice(0, 6)}…)</span>
               <span className={trade.buyerAccepted ? "text-[#5CE0A8]" : "text-[#C88A32]"}>
-                {trade.buyerAccepted ? "Signed ✓" : "Pending"}
+                {trade.buyerAccepted ? "Accepted" : "Waiting"}
               </span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-[#A6A39B]">Seller ({trade.seller.slice(0, 6)}…)</span>
               <span className={trade.sellerAccepted ? "text-[#5CE0A8]" : "text-[#C88A32]"}>
-                {trade.sellerAccepted ? "Signed ✓" : "Pending"}
+                {trade.sellerAccepted ? "Accepted" : "Waiting"}
               </span>
             </div>
           </div>
@@ -437,12 +844,12 @@ export default function SharedTradeRoomPage({
 
         <div className="p-4 sm:p-5">
           <div className="text-[10px] font-mono-tabular uppercase tracking-[0.08em] text-[#6E6C65]">
-            Tatum RPC Receipt Status
+            Payment check
           </div>
           {trade.verification?.verified ? (
             <div className="mt-1.5 space-y-0.5 font-mono-tabular">
               <div className="text-[13px] text-[#5CE0A8] font-medium">
-                Confirmed (0x1) · Block #{trade.verification.blockNumber}
+                Payment check passed
               </div>
               <div className="text-[11px] text-[#A6A39B]">
                 {trade.verification.confirmations} confirmations · {trade.verification.valueEth}{" "}
@@ -453,7 +860,7 @@ export default function SharedTradeRoomPage({
             <div className="mt-1.5 space-y-0.5 font-mono-tabular">
               <div className="text-[13px] text-[#A6A39B]">No Verified Receipt Yet</div>
               <div className="text-[11px] text-[#6E6C65]">
-                Requires Tatum Gateway verification
+                No successful payment check yet
               </div>
             </div>
           )}
@@ -537,8 +944,8 @@ export default function SharedTradeRoomPage({
                     className="px-3.5 py-1 rounded-[3px] bg-[#C5A46D] hover:bg-[#D6B882] text-[#090A0C] font-mono-tabular text-[11px] font-medium transition-colors"
                   >
                     {actionLoading === "accept_terms"
-                      ? "Signing…"
-                      : `Sign & Accept Version ${latestVersion}`}
+                      ? "Saving acceptance…"
+                      : `Accept Version ${latestVersion}`}
                   </button>
                 )}
               </div>
@@ -618,7 +1025,7 @@ export default function SharedTradeRoomPage({
                     Agreement Version History ({trade.termsVersions.length} Revisions)
                   </div>
                   <div className="divide-y divide-white/[0.06] border border-white/[0.07] rounded-[3px] bg-[#090A0C]">
-                    {trade.termsVersions.map((ver: any) => (
+                    {trade.termsVersions.map((ver: TermsVersion) => (
                       <div key={ver.version} className="p-3 space-y-1 text-[12px]">
                         <div className="flex items-center justify-between font-mono-tabular text-[11px]">
                           <span className="text-[#C5A46D]">
@@ -637,25 +1044,165 @@ export default function SharedTradeRoomPage({
             </div>
           </section>
 
-          {/* II. ON-CHAIN VERIFICATION (TATUM RPC GATEWAY) */}
+          {isEvmEscrowNetwork(trade.network) && trade.asset === "ETH" && (
+            <section className="surface-panel rounded-[4px] overflow-hidden">
+              <div className="px-6 py-4 bg-[#11141B] border-b border-white/[0.07] flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-3">
+                  <span className="font-mono-tabular text-[11px] text-[#C5A46D]">ON-CHAIN ESCROW</span>
+                  <h2 className="text-[14px] font-medium text-[#F4F2ED]">
+                    {escrowNetwork?.name || trade.network} ETH escrow
+                  </h2>
+                </div>
+                <span className="font-mono-tabular text-[11px] text-[#6E6C65]">
+                  Chain ID {escrowNetwork?.chainId || "unavailable"}
+                </span>
+              </div>
+              <div className="p-6 space-y-4">
+                {escrowAddress ? (
+                  <>
+                    <p className="break-all font-mono-tabular text-[11px] text-[#A6A39B]">
+                      Contract: {escrowAddress}
+                    </p>
+                    {isLoadingEscrowVersion ? (
+                      <p className="text-[12px] text-[#A6A39B]">Checking escrow contract version…</p>
+                    ) : !isSupportedEscrow ? (
+                      <p className="text-[12px] text-[#DEC392]">
+                        This deployed contract is outdated and its release rules are not supported. Configure a newly deployed Accord escrow version 2 contract before using on-chain actions.
+                      </p>
+                    ) : isLoadingOnChainTradeId ? (
+                      <p className="text-[12px] text-[#A6A39B]">
+                        Checking this trade on {escrowNetwork?.name || trade.network}…
+                      </p>
+                    ) : hasOnChainTrade ? (
+                      <p className="text-[12px] text-[#5CE0A8]">
+                        On-chain trade found · contract state {chainTradeState ?? "loading"}
+                      </p>
+                    ) : (
+                      <p className="text-[12px] text-[#A6A39B]">
+                        No escrow record exists on-chain yet. Both parties must accept the terms before the buyer creates one.
+                      </p>
+                    )}
+
+                    {isSupportedEscrow && !hasOnChainTrade &&
+                      trade.status === "AwaitingDeposit" &&
+                      trade.buyerAccepted &&
+                      trade.sellerAccepted && (
+                        <button
+                          type="button"
+                          disabled={
+                            !connectedWallet ||
+                            connectedWallet.toLowerCase() !== trade.buyer.toLowerCase() ||
+                            isLoadingOnChainTradeId ||
+                            escrowActionLoading !== null
+                          }
+                          onClick={() => void handleCreateOnChainTrade()}
+                          className="rounded-[3px] bg-[#C5A46D] px-4 py-2 text-[12px] font-medium text-[#090A0C] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {escrowActionLoading === "createTrade"
+                            ? "Confirm in wallet…"
+                            : "Create escrow (buyer)"}
+                        </button>
+                      )}
+
+                    {isSupportedEscrow && hasOnChainTrade && chainTradeState === 2 && (
+                      <button
+                        type="button"
+                        disabled={
+                          !connectedWallet ||
+                          connectedWallet.toLowerCase() !== trade.buyer.toLowerCase() ||
+                          escrowActionLoading !== null
+                        }
+                        onClick={() => void handleEscrowDeposit()}
+                        className="rounded-[3px] bg-[#C5A46D] px-4 py-2 text-[12px] font-medium text-[#090A0C] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {escrowActionLoading === "deposit"
+                          ? "Confirm deposit in wallet…"
+                          : `Deposit ${trade.amount} ETH (buyer)`}
+                      </button>
+                    )}
+
+                    {isSupportedEscrow && hasOnChainTrade && (chainTradeState === 3 || chainTradeState === 5) && (
+                      <p className="text-[12px] text-[#DEC392]">
+                        Escrow is funded on-chain. Use “Check payment” below with the deposit transaction hash to sync Accord’s trade record.
+                      </p>
+                    )}
+
+                    {isSupportedEscrow && hasOnChainTrade &&
+                      (chainTradeState === 3 || chainTradeState === 4) &&
+                      connectedWallet?.toLowerCase() === trade.seller.toLowerCase() && (
+                        <button
+                          type="button"
+                          disabled={escrowActionLoading !== null}
+                          onClick={() => void handleEscrowFulfillment()}
+                          className="rounded-[3px] border border-white/[0.14] bg-[#13161C] px-4 py-2 text-[12px] text-[#F4F2ED] disabled:opacity-50"
+                        >
+                          {escrowActionLoading === "confirmFulfillment"
+                            ? "Confirm in wallet…"
+                            : "Confirm fulfillment on-chain (seller)"}
+                        </button>
+                      )}
+
+                    {isSupportedEscrow && hasOnChainTrade &&
+                      chainTradeState === 5 &&
+                      trade.verification?.verified &&
+                      trade.conditions.every((condition) => condition.completed) &&
+                      connectedWallet?.toLowerCase() === trade.buyer.toLowerCase() && (
+                        <button
+                          type="button"
+                          disabled={escrowActionLoading !== null}
+                          onClick={() => void handleEscrowRelease()}
+                          className="rounded-[3px] bg-[#C5A46D] px-4 py-2 text-[12px] font-medium text-[#090A0C] disabled:opacity-50"
+                        >
+                          {escrowActionLoading === "approveRelease"
+                            ? "Confirm release in wallet…"
+                            : "Release escrow to seller (buyer)"}
+                        </button>
+                      )}
+
+                    {isSupportedEscrow && hasOnChainTrade &&
+                      (chainTradeState === 3 || chainTradeState === 5) &&
+                      connectedWallet?.toLowerCase() === trade.seller.toLowerCase() && (
+                        <button
+                          type="button"
+                          disabled={escrowActionLoading !== null}
+                          onClick={() => void handleEscrowRefund()}
+                          className="rounded-[3px] border border-white/[0.14] bg-[#13161C] px-4 py-2 text-[12px] text-[#F4F2ED] disabled:opacity-50"
+                        >
+                          {escrowActionLoading === "refund"
+                            ? "Confirm refund in wallet…"
+                            : "Refund escrow to buyer (seller)"}
+                        </button>
+                      )}
+                  </>
+                ) : (
+                  <p className="text-[12px] text-[#DEC392]">
+                    No {escrowNetwork?.name || trade.network} escrow address is configured for this trade. Deploy or configure
+                    the contract before creating an on-chain escrow.
+                  </p>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* II. PAYMENT CHECK */}
           <section className="surface-panel rounded-[4px] overflow-hidden">
             <div className="px-6 py-4 bg-[#11141B] border-b border-white/[0.07] flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-3">
                 <span className="font-mono-tabular text-[11px] text-[#C5A46D]">SECTION II</span>
                 <h2 className="text-[14px] font-medium text-[#F4F2ED]">
-                  On-Chain Receipt Verification (Tatum JSON-RPC)
+                  Check payment
                 </h2>
               </div>
               <span className="font-mono-tabular text-[11px] text-[#6E6C65]">
-                {trade.network}.gateway.tatum.io
+                Payment network: {trade.network}
               </span>
             </div>
 
             <div className="p-6 space-y-4">
               <p className="text-[13px] text-[#A6A39B] leading-relaxed">
-                Submit the settlement transaction hash on{" "}
-                <span className="text-[#F4F2ED] font-mono-tabular">{trade.network}</span>. Accord
-                verifies the receipt status (<code className="font-mono-tabular text-[#5CE0A8]">0x1</code>), block confirmation depth, sender, recipient, and transferred amount before advancing the agreement to Funded.
+                If payment has been sent, enter its transaction ID. Accord checks the selected
+                network, sender, recipient, amount, and network confirmations. A submitted ID does
+                not mean the payment has been confirmed.
               </p>
 
               <form onSubmit={handleVerifyDepositWithTatum} className="space-y-2.5">
@@ -664,7 +1211,8 @@ export default function SharedTradeRoomPage({
                     type="text"
                     value={txHashInput}
                     onChange={(e) => setTxHashInput(e.target.value)}
-                    placeholder="0x… transaction hash (66 characters)"
+                    aria-label="Payment transaction ID"
+                    placeholder="Paste the payment transaction ID"
                     className="flex-1 px-3.5 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.12] font-mono-tabular text-[12px] text-[#F4F2ED]"
                   />
                   <button
@@ -672,34 +1220,17 @@ export default function SharedTradeRoomPage({
                     disabled={verifyingTx}
                     className="px-4 py-2 rounded-[3px] bg-[#C5A46D] hover:bg-[#D6B882] text-[#090A0C] font-mono-tabular text-[12px] font-medium shrink-0 transition-colors"
                   >
-                    {verifyingTx ? "Querying Tatum RPC…" : "Verify Receipt via Tatum RPC"}
+                    {verifyingTx ? "Checking payment…" : "Check payment"}
                   </button>
                 </div>
 
-                {trade.sampleVerifiableTxHash && !trade.verification?.verified && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.07] font-mono-tabular text-[11px]">
-                    <span className="text-[#A6A39B]">
-                      Verifiable Base Mainnet Tx:{" "}
-                      <span className="text-[#F4F2ED]">
-                        {trade.sampleVerifiableTxHash.slice(0, 22)}…
-                      </span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setTxHashInput(trade.sampleVerifiableTxHash)}
-                      className="text-[#C5A46D] hover:text-[#D6B882]"
-                    >
-                      Populate Sample Hash
-                    </button>
-                  </div>
-                )}
               </form>
 
               {trade.verification && (
                 <div className="mt-4 border border-[#2E9B6E]/35 bg-[#090A0C] rounded-[3px] overflow-hidden">
                   <div className="px-4 py-2.5 bg-[#2E9B6E]/10 border-b border-[#2E9B6E]/25 flex items-center justify-between font-mono-tabular text-[11px]">
                     <span className="text-[#5CE0A8] font-medium">
-                      RECEIPT CONFIRMED ON-CHAIN (STATUS 0x1)
+                      PAYMENT CONFIRMED
                     </span>
                     <a
                       href={`${explorerBase}/tx/${trade.verification.txHash}`}
@@ -707,32 +1238,32 @@ export default function SharedTradeRoomPage({
                       rel="noreferrer"
                       className="text-[#A6A39B] hover:text-[#F4F2ED] inline-flex items-center gap-1"
                     >
-                      <span>Block Explorer</span>
+                      <span>View transaction</span>
                       <ArrowUpRight className="w-3 h-3" />
                     </a>
                   </div>
 
                   <dl className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 font-mono-tabular text-[12px]">
                     <div>
-                      <dt className="text-[10px] text-[#6E6C65] uppercase">Block Height</dt>
+                      <dt className="text-[10px] text-[#6E6C65] uppercase">Recorded at block</dt>
                       <dd className="text-[#F4F2ED] mt-0.5 font-medium">
                         #{trade.verification.blockNumber}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[10px] text-[#6E6C65] uppercase">Confirmations</dt>
+                      <dt className="text-[10px] text-[#6E6C65] uppercase">Network confirmations</dt>
                       <dd className="text-[#5CE0A8] mt-0.5 font-medium">
                         {trade.verification.confirmations} Blocks
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[10px] text-[#6E6C65] uppercase">Verified Value</dt>
+                      <dt className="text-[10px] text-[#6E6C65] uppercase">Amount checked</dt>
                       <dd className="text-[#F4F2ED] mt-0.5 font-medium">
                         {trade.verification.valueEth} {trade.asset}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[10px] text-[#6E6C65] uppercase">Gas Consumed</dt>
+                      <dt className="text-[10px] text-[#6E6C65] uppercase">Network fee units</dt>
                       <dd className="text-[#A6A39B] mt-0.5">
                         {trade.verification.receipt?.gasUsed || "21000"}
                       </dd>
@@ -749,17 +1280,17 @@ export default function SharedTradeRoomPage({
               <div className="flex items-center gap-3">
                 <span className="font-mono-tabular text-[11px] text-[#C5A46D]">SECTION III</span>
                 <h2 className="text-[14px] font-medium text-[#F4F2ED]">
-                  Settlement Conditions &amp; Release Authorization
+                  Trade requirements &amp; next actions
                 </h2>
               </div>
               <span className="font-mono-tabular text-[11px] text-[#A6A39B]">
-                {(trade.conditions || []).filter((c: any) => c.completed).length}/
-                {(trade.conditions || []).length} Fulfilled
+                {(trade.conditions || []).filter((condition) => condition.completed).length}/
+                {(trade.conditions || []).length} complete
               </span>
             </div>
 
             <div className="divide-y divide-white/[0.07]">
-              {(trade.conditions || []).map((cond: any, idx: number) => {
+              {(trade.conditions || []).map((cond, idx: number) => {
                 const isOnChain = cond.type === "onchain_receipt";
                 return (
                   <div key={cond.id} className="p-5 space-y-3">
@@ -783,18 +1314,17 @@ export default function SharedTradeRoomPage({
                           >
                             {cond.completed
                               ? isOnChain
-                                ? "Verified via Tatum RPC"
-                                : "Attested & Hashed"
+                                ? "Payment check passed"
+                                              : "Confirmed by a participant"
                               : isOnChain
-                              ? "Requires Tatum RPC Receipt"
-                              : "Off-Chain Attestation"}
+                                            ? "Needs a payment check"
+                                            : "Waiting for confirmation"}
                           </span>
                         </div>
                         <p className="text-[12px] text-[#A6A39B] pl-6">{cond.description}</p>
                         {cond.completed && (
                           <div className="pl-6 font-mono-tabular text-[11px] text-[#5CE0A8]">
-                            Fulfilled by {cond.completedBy?.slice(0, 14)}…{" "}
-                            {cond.evidenceHash && `· SHA-256 ${cond.evidenceHash.slice(0, 12)}…`}
+                            Marked complete by {cond.completedBy?.slice(0, 14)}…
                           </div>
                         )}
                       </div>
@@ -826,7 +1356,7 @@ export default function SharedTradeRoomPage({
                                     attestationNotes[cond.id] ||
                                     `Attested by ${activeActor.slice(0, 8)}`,
                                 },
-                                `Clause "${cond.title}" attested and anchored to Walrus Memory.`
+                                `You marked "${cond.title}" complete. This is a participant confirmation.`
                               )
                             }
                             className="px-3 py-1.5 rounded-[3px] bg-[#13161C] hover:bg-[#C5A46D] text-[#F4F2ED] hover:text-[#090A0C] border border-white/[0.14] font-mono-tabular text-[11px] font-medium transition-colors"
@@ -849,48 +1379,56 @@ export default function SharedTradeRoomPage({
                   !trade.sellerFulfilled && (
                     <button
                       type="button"
-                      disabled={actionLoading === "confirm_fulfillment"}
+                      disabled={
+                        actionLoading === "confirm_fulfillment" || escrowActionLoading !== null
+                      }
                       onClick={() =>
-                        runTradeAction(
-                          { action: "confirm_fulfillment", actor: activeActor },
-                          "Seller confirmed fulfillment of deliverables."
-                        )
+                        trade.settlementMode === "escrow"
+                          ? void handleEscrowFulfillment()
+                          : void runTradeAction(
+                              { action: "confirm_fulfillment", actor: activeActor },
+                              "Seller marked the delivery complete. This is a participant confirmation."
+                            )
                       }
                       className="px-4 py-2 rounded-[3px] bg-[#13161C] hover:bg-[#181C24] border border-white/[0.14] font-mono-tabular text-[12px] text-[#F4F2ED]"
                     >
-                      Confirm Deliverable Fulfillment (Seller)
+                      Mark delivery complete (seller)
                     </button>
                   )}
 
                 {isBuyerActor &&
                   trade.verification?.verified &&
-                  (trade.conditions || []).every((c: any) => c.completed) &&
+                  (trade.conditions || []).every((condition) => condition.completed) &&
                   trade.status !== "Disputed" &&
                   trade.status !== "Completed" &&
                   trade.status !== "Refunded" && (
                     <button
                       type="button"
-                      disabled={actionLoading === "approve_release"}
+                      disabled={
+                        actionLoading === "approve_release" || escrowActionLoading !== null
+                      }
                       onClick={() =>
-                        runTradeAction(
-                          { action: "approve_release", actor: activeActor },
-                          `Settlement authorized. ${trade.amount} ${trade.asset} released to Seller.`
-                        )
+                        trade.settlementMode === "escrow"
+                          ? void handleEscrowRelease()
+                          : void runTradeAction(
+                              { action: "approve_release", actor: activeActor },
+                              "Trade marked complete in Accord. This action does not move funds."
+                            )
                       }
                       className="px-5 py-2 rounded-[3px] bg-[#C5A46D] hover:bg-[#D6B882] text-[#090A0C] font-mono-tabular text-[12px] font-medium transition-colors"
                     >
-                      Authorize Settlement Release (Buyer)
+                      Mark trade complete (buyer)
                     </button>
                   )}
 
                 {isBuyerActor &&
                   trade.verification?.verified &&
-                  !(trade.conditions || []).every((c: any) => c.completed) &&
+                  !(trade.conditions || []).every((condition) => condition.completed) &&
                   trade.status !== "Disputed" &&
                   trade.status !== "Completed" &&
                   trade.status !== "Refunded" && (
                     <span className="px-3.5 py-1.5 rounded-[3px] bg-[#0E1014] border border-white/[0.08] font-mono-tabular text-[11px] text-[#6E6C65]">
-                      Release Locked · {(trade.conditions || []).filter((c: any) => !c.completed).length} Condition(s) Pending
+                      Waiting for {(trade.conditions || []).filter((condition) => !condition.completed).length} requirement(s)
                     </span>
                   )}
 
@@ -900,16 +1438,18 @@ export default function SharedTradeRoomPage({
                   trade.status !== "Refunded" && (
                     <button
                       type="button"
-                      disabled={actionLoading === "refund"}
+                      disabled={actionLoading === "refund" || escrowActionLoading !== null}
                       onClick={() =>
-                        runTradeAction(
-                          { action: "refund", actor: activeActor },
-                          `Voluntary refund executed. ${trade.amount} ${trade.asset} returned to Buyer.`
-                        )
+                        trade.settlementMode === "escrow"
+                          ? void handleEscrowRefund()
+                          : void runTradeAction(
+                              { action: "refund", actor: activeActor },
+                              "Refund approval recorded in Accord. This action does not move funds."
+                            )
                       }
                       className="px-3.5 py-2 rounded-[3px] bg-[#090A0C] hover:bg-[#13161C] border border-white/[0.1] font-mono-tabular text-[11px] text-[#A6A39B] hover:text-[#F4F2ED]"
                     >
-                      Voluntary Refund to Buyer (Seller)
+                      Record refund approval (seller)
                     </button>
                   )}
               </div>
@@ -922,7 +1462,7 @@ export default function SharedTradeRoomPage({
                     onClick={() => setShowDisputeForm(!showDisputeForm)}
                     className="px-3.5 py-1.5 rounded-[3px] border border-[#C94A4A]/40 text-[#F28B8B] hover:bg-[#C94A4A]/10 font-mono-tabular text-[11px] transition-colors"
                   >
-                    {showDisputeForm ? "Cancel Dispute" : "Lodge Dispute / Evidence"}
+                    {showDisputeForm ? "Cancel" : "Raise a disagreement"}
                   </button>
                 )}
             </div>
@@ -931,20 +1471,20 @@ export default function SharedTradeRoomPage({
             {showDisputeForm && (
               <div className="p-6 bg-[#090A0C] border-t border-[#C94A4A]/40 space-y-3">
                 <div className="font-mono-tabular text-[11px] text-[#F28B8B] uppercase">
-                  Lodge Dispute &amp; Anchor SHA-256 Evidence to Walrus Memory
+                  Describe the disagreement
                 </div>
                 <input
                   type="text"
                   value={disputeReason}
                   onChange={(e) => setDisputeReason(e.target.value)}
-                  placeholder="Specify ground for dispute…"
+                  placeholder="What went wrong?"
                   className="w-full px-3.5 py-2 rounded-[3px] bg-[#0E1014] border border-white/[0.12] text-[12px] text-[#F4F2ED]"
                 />
                 <textarea
                   rows={2}
                   value={disputeEvidenceText}
                   onChange={(e) => setDisputeEvidenceText(e.target.value)}
-                  placeholder="Supporting logs, checksums, or delivery tracking references (hashed via SHA-256)…"
+                  placeholder="Add notes or references that may help explain what happened."
                   className="w-full px-3.5 py-2 rounded-[3px] bg-[#0E1014] border border-white/[0.12] text-[12px] text-[#F4F2ED]"
                 />
                 <button
@@ -958,7 +1498,7 @@ export default function SharedTradeRoomPage({
                         reason: disputeReason,
                         evidenceContent: disputeEvidenceText,
                       },
-                      "Dispute recorded and SHA-256 evidence hash anchored to Walrus Memory."
+                      "Disagreement and supporting details recorded in Accord."
                     );
                     setShowDisputeForm(false);
                     setDisputeReason("");
@@ -966,7 +1506,7 @@ export default function SharedTradeRoomPage({
                   }}
                   className="px-4 py-2 rounded-[3px] bg-[#C94A4A] text-[#F4F2ED] font-mono-tabular text-[12px] font-medium"
                 >
-                  Freeze Agreement &amp; Record Evidence
+                  Record disagreement
                 </button>
               </div>
             )}
@@ -976,16 +1516,16 @@ export default function SharedTradeRoomPage({
               <div className="p-6 bg-[#090A0C] border-t border-[#C5A46D]/40 space-y-4">
                 <div className="flex items-center justify-between font-mono-tabular text-[11px]">
                   <span className="text-[#C5A46D] uppercase">
-                    Neutral Arbiter Ruling Panel
+                    Record a proposed outcome
                   </span>
                   <span className="text-[#6E6C65]">
-                    Designated Arbiter: {trade.arbiter.slice(0, 10)}…
+                    Dispute resolver: {trade.arbiter.slice(0, 10)}…
                   </span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
                   <div>
                     <label className="block font-mono-tabular text-[11px] text-[#A6A39B] mb-1">
-                      Buyer Allocation: {arbiterBuyerSplitPct}% · Seller Allocation:{" "}
+                      Proposed buyer share: {arbiterBuyerSplitPct}% · seller share:{" "}
                       {100 - arbiterBuyerSplitPct}%
                     </label>
                     <input
@@ -1002,7 +1542,7 @@ export default function SharedTradeRoomPage({
                     type="text"
                     value={arbiterResolutionNote}
                     onChange={(e) => setArbiterResolutionNote(e.target.value)}
-                    placeholder="Written arbitral ruling…"
+                    placeholder="Explain the proposed outcome"
                     className="px-3.5 py-2 rounded-[3px] bg-[#0E1014] border border-white/[0.12] text-[12px] text-[#F4F2ED]"
                   />
                 </div>
@@ -1021,14 +1561,14 @@ export default function SharedTradeRoomPage({
                             100 - arbiterBuyerSplitPct
                           }% Seller`,
                       },
-                      "Dispute resolved by Neutral Arbiter and anchored to Walrus Memory."
+                      "The proposed dispute outcome was recorded in Accord. This action does not move funds."
                     )
                   }
                   className="px-4 py-2 rounded-[3px] bg-[#C5A46D] disabled:opacity-40 text-[#090A0C] font-mono-tabular text-[12px] font-medium"
                 >
                   {isArbiterActor
-                    ? "Issue Binding Arbitral Ruling"
-                    : "Select 'View as: Arbiter' Above to Execute Ruling"}
+                    ? "Record proposed outcome"
+                    : "Select “View as: Arbiter” above to record an outcome"}
                 </button>
               </div>
             )}
@@ -1061,7 +1601,7 @@ export default function SharedTradeRoomPage({
               {(trade.activity || [])
                 .slice()
                 .reverse()
-                .map((act: any) => (
+                .map((act: TradeActivity) => (
                   <div
                     key={act.id}
                     className="px-6 py-3.5 grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-baseline text-[12px]"
@@ -1135,7 +1675,7 @@ export default function SharedTradeRoomPage({
                   const count =
                     cat === "ALL"
                       ? tradeMemories.length
-                      : tradeMemories.filter((m: any) => m.category === cat).length;
+                      : tradeMemories.filter((memory) => memory.category === cat).length;
                   return (
                     <button
                       key={cat}
@@ -1157,11 +1697,11 @@ export default function SharedTradeRoomPage({
               <div className="max-h-72 overflow-y-auto divide-y divide-white/[0.06] border border-white/[0.07] rounded-[3px] bg-[#090A0C]">
                 {tradeMemories
                   .filter(
-                    (m: any) =>
-                      selectedMemoryCategory === "ALL" || m.category === selectedMemoryCategory
+                    (memory) =>
+                      selectedMemoryCategory === "ALL" || memory.category === selectedMemoryCategory
                   )
                   .slice(0, 12)
-                  .map((mem: any) => (
+                  .map((mem) => (
                     <Link
                       key={mem.id}
                       href={`/memory?tradeRef=${encodeURIComponent(
@@ -1193,7 +1733,7 @@ export default function SharedTradeRoomPage({
                       <div className="flex items-center justify-between font-mono-tabular text-[10px] text-[#6E6C65]">
                         <span>{mem.id}</span>
                         <span>
-                          {new Date(mem.timestamp).toLocaleTimeString([], {
+                          {new Date(mem.metadata.timestamp).toLocaleTimeString([], {
                             hour: "2-digit",
                             minute: "2-digit",
                           })}
@@ -1203,8 +1743,8 @@ export default function SharedTradeRoomPage({
                   ))}
 
                 {tradeMemories.filter(
-                  (m: any) =>
-                    selectedMemoryCategory === "ALL" || m.category === selectedMemoryCategory
+                  (memory) =>
+                    selectedMemoryCategory === "ALL" || memory.category === selectedMemoryCategory
                 ).length === 0 && (
                   <div className="p-4 text-center font-mono-tabular text-[11px] text-[#6E6C65]">
                     No memory records in {selectedMemoryCategory}.
@@ -1301,7 +1841,8 @@ export default function SharedTradeRoomPage({
                     {assistantResponse.answer}
                   </p>
 
-                  {assistantResponse.verifiedFacts?.length > 0 && (
+                  {assistantResponse.verifiedFacts &&
+                    assistantResponse.verifiedFacts.length > 0 && (
                     <div className="pt-2.5 border-t border-white/[0.07] space-y-1">
                       <div className="font-mono-tabular text-[10px] uppercase tracking-[0.06em] text-[#5CE0A8]">
                         Verified Facts (Tatum RPC &amp; Signed Record)
@@ -1314,7 +1855,7 @@ export default function SharedTradeRoomPage({
                     </div>
                   )}
 
-                  {assistantResponse.userClaims?.length > 0 && (
+                  {assistantResponse.userClaims && assistantResponse.userClaims.length > 0 && (
                     <div className="pt-2.5 border-t border-white/[0.07] space-y-1">
                       <div className="font-mono-tabular text-[10px] uppercase tracking-[0.06em] text-[#C5A46D]">
                         Participant Attestations &amp; Claims

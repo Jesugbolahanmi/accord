@@ -1,19 +1,40 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import {
   RefreshCw,
   Search,
   Plus,
   ArrowUpRight,
-  Check,
-  AlertTriangle,
-  Clock,
-  FileText,
   Filter,
   X,
 } from "lucide-react";
+import type {
+  MemoryBoxOverview,
+  WalrusConfigStatus,
+  WalrusIntegrationTelemetry,
+  WalrusTradeMemory,
+} from "@/lib/walrus/memory";
+import type { Trade } from "@/lib/trades/store";
+
+interface MemoryBoxResponse {
+  success?: boolean;
+  memories?: WalrusTradeMemory[];
+  trades?: Trade[];
+  overview?: MemoryBoxOverview | null;
+  relayerHealth?: WalrusIntegrationTelemetry | null;
+  configStatus?: WalrusConfigStatus | null;
+  mainnetVerifiedCount?: number;
+  count?: number;
+  message?: string;
+  retriedMemory?: WalrusTradeMemory | null;
+  memory?: WalrusTradeMemory;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "An unexpected error occurred.";
+}
 
 const MEMORY_CATEGORIES = [
   "All",
@@ -41,12 +62,60 @@ const RECORD_TYPES = [
   "USER_PREFERENCE",
 ] as const;
 
+const CATEGORY_LABELS: Record<string, string> = {
+  Agreements: "Agreements",
+  Transactions: "Payments",
+  Fulfilment: "Delivery",
+  Disputes: "Disagreements",
+  Settlement: "Trade outcomes",
+  "Trade History": "Activity",
+};
+
+const RECORD_TYPE_LABELS: Record<string, string> = {
+  TRADE_CREATED: "Trade created",
+  TRADE_TERMS: "Terms saved",
+  TERMS_AMENDMENT: "Terms changed",
+  TRADE_ACCEPTANCE: "Terms accepted",
+  PAYMENT_SUBMITTED: "Payment submitted",
+  ONCHAIN_VERIFICATION: "Payment checked",
+  CONDITION_UPDATE: "Requirement updated",
+  DISPUTE_EVIDENCE: "Disagreement evidence",
+  DISPUTE_RESOLUTION: "Disagreement outcome",
+  SETTLEMENT_COMPLETED: "Trade marked complete",
+  SETTLEMENT_REFUNDED: "Refund recorded",
+  SETTLEMENT_LESSON: "Trade note",
+  USER_PREFERENCE: "Preference",
+};
+
+function getCategoryLabel(category: string): string {
+  return CATEGORY_LABELS[category] || category;
+}
+
+function getRecordTypeLabel(type: string): string {
+  return RECORD_TYPE_LABELS[type] || type;
+}
+
+function getTradeStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    AwaitingAcceptance: "Waiting for agreement",
+    AwaitingDeposit: "Waiting for payment",
+    Funded: "Payment check passed",
+    AwaitingConditions: "Waiting for requirements",
+    ReadyForRelease: "Ready to finish",
+    Completed: "Marked complete in Accord",
+    Disputed: "Disagreement raised",
+    Refunded: "Refund outcome recorded",
+    Expired: "Expired",
+  };
+  return labels[status] || status;
+}
+
 export default function AccordMemoryBoxPage() {
-  const [memories, setMemories] = useState<any[]>([]);
-  const [trades, setTrades] = useState<any[]>([]);
-  const [overview, setOverview] = useState<any | null>(null);
-  const [relayerHealth, setRelayerHealth] = useState<any | null>(null);
-  const [configStatus, setConfigStatus] = useState<any | null>(null);
+  const [memories, setMemories] = useState<WalrusTradeMemory[]>([]);
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [overview, setOverview] = useState<MemoryBoxOverview | null>(null);
+  const [relayerHealth, setRelayerHealth] = useState<WalrusIntegrationTelemetry | null>(null);
+  const [configStatus, setConfigStatus] = useState<WalrusConfigStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
@@ -63,68 +132,65 @@ export default function AccordMemoryBoxPage() {
 
   // Active View Mode: "archive" (Searchable Memory Records) vs "timeline" (Complete Trade Timeline)
   const [activeViewMode, setActiveViewMode] = useState<"archive" | "timeline">("archive");
-  const [timelineTradeRef, setTimelineTradeRef] = useState<string>("ACC-2026-8812");
+  const [timelineTradeRef, setTimelineTradeRef] = useState<string>("");
 
   // Selected Individual Memory Record for Detailed Inspection
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
+  const selectedMemoryIdRef = useRef(selectedMemoryId);
+  useEffect(() => {
+    selectedMemoryIdRef.current = selectedMemoryId;
+  }, [selectedMemoryId]);
 
   // Manual Memory Creation Form
   const [showWriteModal, setShowWriteModal] = useState(false);
-  const [newTradeRef, setNewTradeRef] = useState("ACC-2026-8812");
+  const [newTradeRef, setNewTradeRef] = useState("");
   const [newMemoryTitle, setNewMemoryTitle] = useState("");
   const [newMemoryType, setNewMemoryType] = useState("SETTLEMENT_LESSON");
   const [newMemoryContent, setNewMemoryContent] = useState("");
   const [writingMemory, setWritingMemory] = useState(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
-  const loadMemoryBoxData = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch("/api/memory/seed");
-      const data = await res.json();
-      if (data.success) {
+  useEffect(() => {
+    let active = true;
+    let loadedMemories: WalrusTradeMemory[] | null = null;
+    void fetch("/api/memory/seed")
+      .then(async (res) => (await res.json()) as MemoryBoxResponse)
+      .then((data) => {
+        if (!active || !data.success) return;
         const memList = data.memories || [];
+        loadedMemories = memList;
         setMemories(memList);
         setTrades(data.trades || []);
         setOverview(data.overview || null);
         setRelayerHealth(data.relayerHealth || null);
         setConfigStatus(data.configStatus || null);
-
-        const urlRecordId =
-          typeof window !== "undefined"
-            ? new URLSearchParams(window.location.search).get("recordId")
-            : null;
-        if (urlRecordId) {
-          setSelectedMemoryId(urlRecordId);
-        } else if (!selectedMemoryId && memList.length > 0) {
-          setSelectedMemoryId(memList[0].id);
+      })
+      .catch((err: unknown) => {
+        if (active) console.error("Failed to load Accord Memory Box:", err);
+      })
+      .finally(() => {
+        if (!active) return;
+        const params = new URLSearchParams(window.location.search);
+        const qTrade = params.get("tradeRef");
+        const qRecord = params.get("recordId");
+        if (qTrade) {
+          setSelectedTradeRef(qTrade);
+          setTimelineTradeRef(qTrade);
         }
-      }
-    } catch (err) {
-      console.error("Failed to load Accord Memory Box:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+        if (qRecord) {
+          setSelectedMemoryId(qRecord);
+        } else if (!selectedMemoryIdRef.current && loadedMemories?.length) {
+          setSelectedMemoryId(loadedMemories[0].id);
+        }
+        if (params.get("view") === "timeline") {
+          setActiveViewMode("timeline");
+        }
+        setLoading(false);
+      });
 
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      const qTrade = params.get("tradeRef");
-      const qRecord = params.get("recordId");
-      const qView = params.get("view");
-      if (qTrade) {
-        setSelectedTradeRef(qTrade);
-        setTimelineTradeRef(qTrade);
-      }
-      if (qRecord) {
-        setSelectedMemoryId(qRecord);
-      }
-      if (qView === "timeline") {
-        setActiveViewMode("timeline");
-      }
-    }
-    loadMemoryBoxData();
+    return () => {
+      active = false;
+    };
   }, []);
 
   const handleRetryAllPending = async () => {
@@ -136,16 +202,16 @@ export default function AccordMemoryBoxPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ forceSync: true }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as MemoryBoxResponse;
       if (data.success) {
         setMemories(data.memories || []);
         setOverview(data.overview || null);
         setRelayerHealth(data.relayerHealth || null);
         setConfigStatus(data.configStatus || null);
-        setStatusBanner(data.message);
+        setStatusBanner(data.message || "Saved records refreshed.");
       }
-    } catch (err: any) {
-      setStatusBanner(`Retry failed: ${err.message}`);
+    } catch (err: unknown) {
+      setStatusBanner(`Retry failed: ${getErrorMessage(err)}`);
     } finally {
       setSyncing(false);
     }
@@ -160,15 +226,19 @@ export default function AccordMemoryBoxPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ memoryId }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as MemoryBoxResponse;
       if (data.success) {
         setMemories(data.memories || []);
         setOverview(data.overview || null);
         setRelayerHealth(data.relayerHealth || null);
-        setStatusBanner(data.message);
+        setStatusBanner(
+          data.retriedMemory?.verifiedOnWalrus
+            ? "This record was saved and confirmed online."
+            : "This record is still waiting for online confirmation."
+        );
       }
-    } catch (err: any) {
-      setStatusBanner(`Single record retry failed: ${err.message}`);
+    } catch (err: unknown) {
+      setStatusBanner(`Single record retry failed: ${getErrorMessage(err)}`);
     } finally {
       setRetryingId(null);
     }
@@ -194,22 +264,23 @@ export default function AccordMemoryBoxPage() {
           },
         }),
       });
-      const data = await res.json();
-      if (data.success && data.memory) {
-        setMemories((prev) => [data.memory, ...prev]);
+      const data = (await res.json()) as MemoryBoxResponse;
+      const memory = data.memory;
+      if (data.success && memory) {
+        setMemories((prev) => [memory, ...prev]);
         if (data.overview) setOverview(data.overview);
-        setSelectedMemoryId(data.memory.id);
+        setSelectedMemoryId(memory.id);
         setNewMemoryContent("");
         setNewMemoryTitle("");
         setShowWriteModal(false);
         setStatusBanner(
-          data.memory.verifiedOnWalrus
-            ? `Confirmed on Walrus Mainnet (Blob ID: ${data.memory.blobId}).`
-            : `Preserved in Accord Memory Box (${data.memory.id}, Status: ${data.memory.persistenceStatus}).`
+          memory.verifiedOnWalrus
+            ? "Your note was saved and confirmed online."
+            : "Your note was saved in Accord. Online confirmation is still pending."
         );
       }
-    } catch (err: any) {
-      setStatusBanner(`Failed to preserve memory: ${err.message}`);
+    } catch (err: unknown) {
+      setStatusBanner(`Failed to preserve memory: ${getErrorMessage(err)}`);
     } finally {
       setWritingMemory(false);
     }
@@ -361,24 +432,24 @@ export default function AccordMemoryBoxPage() {
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6 pb-7 border-b border-white/[0.08]">
         <div className="space-y-2">
           <div className="flex items-center gap-2.5 text-[11px] font-mono-tabular uppercase tracking-[0.14em] text-[#A6A39B]">
-            <span className="text-[#C5A46D]">ACCORD MEMORY BOX</span>
+            <span className="text-[#C5A46D]">SAVED TRADE HISTORY</span>
             <span className="text-white/20">/</span>
-            <span>Persistent Financial Records Archive</span>
+            <span>Agreements, payments, and updates</span>
           </div>
           <h1 className="font-editorial text-[34px] sm:text-[42px] leading-[1.06] tracking-[-0.02em] text-[#F4F2ED]">
-            Every agreement, verification, and outcome—preserved.
+            Find the details of past trades.
           </h1>
           <p className="text-[14px] text-[#A6A39B] max-w-[66ch] leading-relaxed">
-            Deterministic, searchable archive of versioned agreements, Tatum RPC transaction
-            proofs, off-chain fulfilment attestations, dispute evidence, and final settlements
-            backed by Walrus Memory.
+            Review saved terms, payment checks, delivery updates, disagreements, and trade
+            outcomes. Each record shows whether its online save has been confirmed or is still
+            pending.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           <div
             role="group"
-            aria-label="Memory Box View Mode"
+            aria-label="Saved trade history view"
             className="inline-flex items-center bg-[#0E1014] border border-white/[0.1] rounded-[3px] p-0.5 font-mono-tabular text-[11px]"
           >
             <button
@@ -390,7 +461,7 @@ export default function AccordMemoryBoxPage() {
                   : "text-[#A6A39B] hover:text-[#F4F2ED]"
               }`}
             >
-              Records Archive
+              Saved records
             </button>
             <button
               type="button"
@@ -401,7 +472,7 @@ export default function AccordMemoryBoxPage() {
                   : "text-[#A6A39B] hover:text-[#F4F2ED]"
               }`}
             >
-              Complete Trade Timeline
+              Trade timeline
             </button>
           </div>
 
@@ -411,7 +482,7 @@ export default function AccordMemoryBoxPage() {
             className="px-3.5 py-2 rounded-[3px] bg-[#0E1014] hover:bg-[#13161C] border border-white/[0.14] font-mono-tabular text-[12px] text-[#F4F2ED] inline-flex items-center gap-1.5 transition-colors"
           >
             <Plus className="w-3.5 h-3.5 text-[#C5A46D]" />
-            <span>Record Memory</span>
+            <span>Add a saved note</span>
           </button>
 
           <button
@@ -422,29 +493,37 @@ export default function AccordMemoryBoxPage() {
           >
             <RefreshCw className={`w-3.5 h-3.5 ${syncing ? "animate-spin" : ""}`} />
             <span>
-              {syncing ? "Syncing Pending Records…" : "Retry / Verify Mainnet Persistence"}
+              {syncing ? "Retrying pending saves…" : "Retry pending online saves"}
             </span>
           </button>
         </div>
       </div>
 
-      {/* 1A. MEMORY BOX OVERVIEW STRIP (All figures from actual application data) */}
+      <div
+        role="note"
+        className="rounded-[3px] border border-[#C88A32]/35 bg-[#C88A32]/[0.07] px-4 py-3 text-[12px] leading-relaxed text-[#DEC392]"
+      >
+        Records shown here come from Accord’s saved activity. A stored record alone does not prove a
+        payment or off-chain delivery occurred.
+      </div>
+
+      {/* Saved trade history overview */}
       <div className="surface-panel rounded-[4px] grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07]">
         <div className="p-5 space-y-1">
           <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
-            Total Memory Records
+            Saved records
           </div>
           <div className="font-mono-tabular text-[26px] font-medium text-[#F4F2ED]">
             {overview?.totalRecords ?? memories.length}
           </div>
           <div className="text-[11px] text-[#A6A39B]">
-            Across 6 structured classifications
+            Across all your saved trades
           </div>
         </div>
 
         <div className="p-5 space-y-1">
           <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
-            Confirmed Walrus Mainnet
+            Confirmed online saves
           </div>
           <div
             className={`font-mono-tabular text-[26px] font-medium ${
@@ -456,151 +535,161 @@ export default function AccordMemoryBoxPage() {
             {overview?.confirmedMainnetRecords ?? 0}
           </div>
           <div className="text-[11px] text-[#6E6C65]">
-            Write + Blob ID + Retrieval verified
+            Saved and checked online
           </div>
         </div>
 
         <div className="p-5 space-y-1">
           <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
-            Pending / Unconfirmed
+            Waiting for online confirmation
           </div>
           <div className="font-mono-tabular text-[26px] font-medium text-[#C5A46D]">
             {overview?.pendingOrUnconfirmedRecords ?? memories.length}
           </div>
           <div className="text-[11px] text-[#6E6C65]">
-            Preserved locally · Ready for retry
+            Kept in this app · Can be retried
           </div>
         </div>
 
         <div className="p-5 space-y-1">
           <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
-            Trades Preserved
+            Trades with saved history
           </div>
           <div className="font-mono-tabular text-[26px] font-medium text-[#F4F2ED]">
             {overview?.tradesWithPreservedHistories ?? 3}
           </div>
           <div className="text-[11px] text-[#A6A39B]">
-            Auditable agreement timelines
+            Agreement and activity records
           </div>
         </div>
 
         <div className="p-5 space-y-1 col-span-2 sm:col-span-1">
           <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
-            Recent Activity (24h)
+            Recent updates (24h)
           </div>
           <div className="font-mono-tabular text-[26px] font-medium text-[#F4F2ED]">
             {overview?.recentActivityCount24h ?? memories.length}
           </div>
           <div className="text-[11px] text-[#5CE0A8]">
-            Auto-captured from trade lifecycle
+            Saved during trade activity
           </div>
         </div>
       </div>
 
-      {/* 2. ACCURATE WALRUS MAINNET INTEGRATION STATUS MATRIX */}
-      <div className="surface-panel rounded-[4px] p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-white/[0.07]">
-          <div className="flex items-center gap-2.5">
-            <span className="font-mono-tabular text-[11px] uppercase tracking-[0.08em] text-[#C5A46D]">
-              Walrus Memory Mainnet Telemetry
-            </span>
-            <span
-              className={`status-pill ${
-                relayerHealth?.mainnetWritesEnabled
-                  ? "status-pill-verified"
-                  : "status-pill-brass"
-              }`}
-            >
-              {relayerHealth?.overallLabel || "Checking Walrus Status…"}
-            </span>
+      {/* Optional technical storage diagnostics */}
+      <details className="surface-panel rounded-[4px]">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-5 py-4 text-[13px] text-[#F4F2ED] [&::-webkit-details-marker]:hidden">
+          <span>Online save status and technical details</span>
+          <span className="font-mono-tabular text-[12px] text-[#C5A46D]">
+            {overview?.confirmedMainnetRecords ?? 0} confirmed ·{" "}
+            {overview?.pendingOrUnconfirmedRecords ?? memories.length} pending
+          </span>
+        </summary>
+        <div className="p-5 pt-0 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-white/[0.07]">
+            <div className="flex items-center gap-2.5">
+              <span className="font-mono-tabular text-[11px] uppercase tracking-[0.08em] text-[#C5A46D]">
+                Walrus Memory Mainnet Telemetry
+              </span>
+              <span
+                className={`status-pill ${
+                  relayerHealth?.mainnetWritesEnabled
+                    ? "status-pill-verified"
+                    : "status-pill-brass"
+                }`}
+              >
+                {relayerHealth?.overallLabel || "Checking Walrus Status…"}
+              </span>
+            </div>
+            <div className="font-mono-tabular text-[11px] text-[#6E6C65]">
+              Strict Persistence Rule:{" "}
+              <code className="text-[#D8D5CE]">verifiedOnWalrus = true</code> requires Mainnet
+              Write + Blob ID + Confirmed Retrieval
+            </div>
           </div>
-          <div className="font-mono-tabular text-[11px] text-[#6E6C65]">
-            Strict Persistence Rule: <code className="text-[#D8D5CE]">verifiedOnWalrus = true</code>{" "}
-            requires Mainnet Write + Blob ID + Confirmed Retrieval
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 font-mono-tabular text-[11px]">
+            <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.07] space-y-1">
+              <div className="flex items-center justify-between text-[#6E6C65]">
+                <span>1. RELAYER ENDPOINT</span>
+                <span
+                  className={
+                    relayerHealth?.relayerReachable ? "text-[#5CE0A8]" : "text-[#C94A4A]"
+                  }
+                >
+                  {relayerHealth?.relayerReachable ? "REACHABLE" : "UNREACHABLE"}
+                </span>
+              </div>
+              <div className="text-[#F4F2ED] truncate">
+                {relayerHealth?.url || "https://relayer.memory.walrus.xyz"}
+              </div>
+              <div className="text-[#6E6C65]">
+                Health check only — does not imply blob persistence
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.07] space-y-1">
+              <div className="flex items-center justify-between text-[#6E6C65]">
+                <span>2. CREDENTIALS (.env.local)</span>
+                <span
+                  className={
+                    relayerHealth?.credentialsConfigured ? "text-[#5CE0A8]" : "text-[#C88A32]"
+                  }
+                >
+                  {relayerHealth?.credentialsConfigured ? "CONFIGURED" : "MISSING (DEV MOCK)"}
+                </span>
+              </div>
+              <div className="text-[#F4F2ED] truncate">
+                {relayerHealth?.credentialsConfigured
+                  ? `Account: ${configStatus?.accountIdPreview}`
+                  : `Missing: ${(configStatus?.missingEnvVars || ["MEMWAL_PRIVATE_KEY", "MEMWAL_ACCOUNT_ID"]).join(", ")}`}
+              </div>
+              <div className="text-[#6E6C65]">
+                {relayerHealth?.credentialsConfigured
+                  ? "Server-side Ed25519 signer ready"
+                  : "Development-only local indexing active"}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.07] space-y-1">
+              <div className="flex items-center justify-between text-[#6E6C65]">
+                <span>3. MAINNET WRITES</span>
+                <span
+                  className={
+                    relayerHealth?.mainnetWritesEnabled ? "text-[#5CE0A8]" : "text-[#C88A32]"
+                  }
+                >
+                  {relayerHealth?.mainnetWritesEnabled ? "ENABLED" : "PENDING CREDENTIALS"}
+                </span>
+              </div>
+              <div className="text-[#F4F2ED] truncate">
+                Submitted: {relayerHealth?.writesSubmittedCount ?? 0} · Confirmed:{" "}
+                {relayerHealth?.writesConfirmedCount ?? 0}
+              </div>
+              <div className="text-[#6E6C65] truncate">
+                Aggregator:{" "}
+                {relayerHealth?.aggregatorUrl ||
+                  "https://aggregator.memory.walrus-mainnet.walrus.space"}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.07] space-y-1">
+              <div className="flex items-center justify-between text-[#6E6C65]">
+                <span>4. RETRIEVAL &amp; RETRY QUEUE</span>
+                <span className="text-[#C5A46D]">
+                  {relayerHealth?.writesFailedOrPendingCount ?? memories.length} Pending
+                </span>
+              </div>
+              <div className="text-[#F4F2ED]">
+                Retrieved &amp; Verified: {relayerHealth?.memoriesRetrievedVerifiedCount ?? 0}
+              </div>
+              <div className="text-[#6E6C65]">
+                In-place retry prevents duplicate records
+              </div>
+            </div>
           </div>
         </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 font-mono-tabular text-[11px]">
-          <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.07] space-y-1">
-            <div className="flex items-center justify-between text-[#6E6C65]">
-              <span>1. RELAYER ENDPOINT</span>
-              <span
-                className={
-                  relayerHealth?.relayerReachable ? "text-[#5CE0A8]" : "text-[#C94A4A]"
-                }
-              >
-                {relayerHealth?.relayerReachable ? "REACHABLE" : "UNREACHABLE"}
-              </span>
-            </div>
-            <div className="text-[#F4F2ED] truncate">
-              {relayerHealth?.url || "https://relayer.memory.walrus.xyz"}
-            </div>
-            <div className="text-[#6E6C65]">
-              Health check only — does not imply blob persistence
-            </div>
-          </div>
-
-          <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.07] space-y-1">
-            <div className="flex items-center justify-between text-[#6E6C65]">
-              <span>2. CREDENTIALS (.env.local)</span>
-              <span
-                className={
-                  relayerHealth?.credentialsConfigured ? "text-[#5CE0A8]" : "text-[#C88A32]"
-                }
-              >
-                {relayerHealth?.credentialsConfigured ? "CONFIGURED" : "MISSING (DEV MOCK)"}
-              </span>
-            </div>
-            <div className="text-[#F4F2ED] truncate">
-              {relayerHealth?.credentialsConfigured
-                ? `Account: ${configStatus?.accountIdPreview}`
-                : `Missing: ${(configStatus?.missingEnvVars || ["MEMWAL_PRIVATE_KEY", "MEMWAL_ACCOUNT_ID"]).join(", ")}`}
-            </div>
-            <div className="text-[#6E6C65]">
-              {relayerHealth?.credentialsConfigured
-                ? "Server-side Ed25519 signer ready"
-                : "Development-only local indexing active"}
-            </div>
-          </div>
-
-          <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.07] space-y-1">
-            <div className="flex items-center justify-between text-[#6E6C65]">
-              <span>3. MAINNET WRITES</span>
-              <span
-                className={
-                  relayerHealth?.mainnetWritesEnabled ? "text-[#5CE0A8]" : "text-[#C88A32]"
-                }
-              >
-                {relayerHealth?.mainnetWritesEnabled ? "ENABLED" : "PENDING CREDENTIALS"}
-              </span>
-            </div>
-            <div className="text-[#F4F2ED] truncate">
-              Submitted: {relayerHealth?.writesSubmittedCount ?? 0} · Confirmed:{" "}
-              {relayerHealth?.writesConfirmedCount ?? 0}
-            </div>
-            <div className="text-[#6E6C65] truncate">
-              Aggregator:{" "}
-              {relayerHealth?.aggregatorUrl ||
-                "https://aggregator.memory.walrus-mainnet.walrus.space"}
-            </div>
-          </div>
-
-          <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.07] space-y-1">
-            <div className="flex items-center justify-between text-[#6E6C65]">
-              <span>4. RETRIEVAL &amp; RETRY QUEUE</span>
-              <span className="text-[#C5A46D]">
-                {relayerHealth?.writesFailedOrPendingCount ?? memories.length} Pending
-              </span>
-            </div>
-            <div className="text-[#F4F2ED]">
-              Retrieved &amp; Verified: {relayerHealth?.memoriesRetrievedVerifiedCount ?? 0}
-            </div>
-            <div className="text-[#6E6C65]">
-              In-place retry prevents duplicate records
-            </div>
-          </div>
-        </div>
-      </div>
+      </details>
 
       {statusBanner && (
         <div className="p-3.5 rounded-[3px] bg-[#13161C] border border-[#C5A46D]/40 text-[#F4F2ED] font-mono-tabular text-[12px] flex items-center justify-between gap-4">
@@ -623,7 +712,7 @@ export default function AccordMemoryBoxPage() {
         >
           <div className="flex items-center justify-between">
             <span className="font-mono-tabular text-[11px] uppercase tracking-[0.08em] text-[#C5A46D]">
-              Preserve New Structured Memory Record
+              Add a saved note
             </span>
             <button
               type="button"
@@ -636,19 +725,19 @@ export default function AccordMemoryBoxPage() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label className="block font-mono-tabular text-[10px] uppercase text-[#6E6C65] mb-1">
-                Trade Reference
+                Trade ID
               </label>
               <input
                 type="text"
                 value={newTradeRef}
                 onChange={(e) => setNewTradeRef(e.target.value)}
-                placeholder="ACC-2026-8812"
+                placeholder="Trade reference"
                 className="w-full px-3 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.12] font-mono-tabular text-[12px] text-[#F4F2ED]"
               />
             </div>
             <div>
               <label className="block font-mono-tabular text-[10px] uppercase text-[#6E6C65] mb-1">
-                Record Type
+                Note category
               </label>
               <select
                 value={newMemoryType}
@@ -657,20 +746,20 @@ export default function AccordMemoryBoxPage() {
               >
                 {RECORD_TYPES.map((t) => (
                   <option key={t} value={t}>
-                    {t}
+                    {getRecordTypeLabel(t)}
                   </option>
                 ))}
               </select>
             </div>
             <div>
               <label className="block font-mono-tabular text-[10px] uppercase text-[#6E6C65] mb-1">
-                Record Title (Optional)
+                Title (optional)
               </label>
               <input
                 type="text"
                 value={newMemoryTitle}
                 onChange={(e) => setNewMemoryTitle(e.target.value)}
-                placeholder="e.g., Counterparty Delivery Confirmation"
+                placeholder="e.g., Delivery confirmed"
                 className="w-full px-3 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.12] text-[12px] text-[#F4F2ED]"
               />
             </div>
@@ -680,7 +769,7 @@ export default function AccordMemoryBoxPage() {
               type="text"
               value={newMemoryContent}
               onChange={(e) => setNewMemoryContent(e.target.value)}
-              placeholder="Enter structured trade record, counterparty preference, or evidence note…"
+              placeholder="Write the detail you want to save…"
               className="flex-1 px-3 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.12] text-[12px] text-[#F4F2ED]"
             />
             <button
@@ -688,7 +777,7 @@ export default function AccordMemoryBoxPage() {
               disabled={writingMemory || !newMemoryContent.trim()}
               className="px-5 py-2 rounded-[3px] bg-[#C5A46D] hover:bg-[#D6B882] disabled:opacity-40 text-[#090A0C] font-mono-tabular text-[12px] font-medium"
             >
-              {writingMemory ? "Preserving…" : "Preserve Record"}
+              {writingMemory ? "Saving…" : "Save note"}
             </button>
           </div>
         </form>
@@ -717,7 +806,7 @@ export default function AccordMemoryBoxPage() {
                       : "bg-[#0E1014] hover:bg-[#13161C] text-[#A6A39B] hover:text-[#F4F2ED] border border-white/[0.08]"
                   }`}
                 >
-                  <span>{cat}</span>
+                  <span>{getCategoryLabel(cat)}</span>
                   <span
                     className={`text-[10px] px-1.5 py-0.2 rounded-[2px] ${
                       isSelected ? "bg-[#090A0C]/20 text-[#090A0C]" : "bg-white/[0.06] text-[#A6A39B]"
@@ -735,7 +824,7 @@ export default function AccordMemoryBoxPage() {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 font-mono-tabular text-[11px] uppercase tracking-[0.08em] text-[#C5A46D]">
                 <Filter className="w-3.5 h-3.5" />
-                <span>Deterministic Archive Search &amp; Filters (Zero AI Dependency)</span>
+                <span>Find a saved record</span>
               </div>
               <button
                 type="button"
@@ -753,7 +842,7 @@ export default function AccordMemoryBoxPage() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search by Trade ID, counterparty, tx hash (0x…), evidence hash, or content…"
+                  placeholder="Search by trade ID, wallet, transaction ID, or saved text…"
                   className="w-full pl-9 pr-3 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.12] text-[12px] text-[#F4F2ED]"
                 />
               </div>
@@ -765,7 +854,7 @@ export default function AccordMemoryBoxPage() {
                   onChange={(e) => setSelectedTradeRef(e.target.value)}
                   className="w-full px-2.5 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.12] font-mono-tabular text-[11px] text-[#F4F2ED]"
                 >
-                  <option value="all">All Trades</option>
+                  <option value="all">All trades</option>
                   {availableTradeRefs.map((ref) => (
                     <option key={ref} value={ref}>
                       {ref}
@@ -781,7 +870,7 @@ export default function AccordMemoryBoxPage() {
                   onChange={(e) => setSelectedType(e.target.value)}
                   className="w-full px-2.5 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.12] font-mono-tabular text-[11px] text-[#F4F2ED]"
                 >
-                  <option value="">All Record Types</option>
+                  <option value="">All note categories</option>
                   {RECORD_TYPES.map((t) => (
                     <option key={t} value={t}>
                       {t}
@@ -797,10 +886,10 @@ export default function AccordMemoryBoxPage() {
                   onChange={(e) => setPersistenceFilter(e.target.value)}
                   className="w-full px-2.5 py-2 rounded-[3px] bg-[#090A0C] border border-white/[0.12] font-mono-tabular text-[11px] text-[#F4F2ED]"
                 >
-                  <option value="all">All Persistence States</option>
-                  <option value="confirmed_mainnet">Confirmed Walrus Mainnet Only</option>
-                  <option value="pending">Pending / Unconfirmed Only</option>
-                  <option value="failed">Failed Writes Only</option>
+                  <option value="all">All save statuses</option>
+                  <option value="confirmed_mainnet">Confirmed online</option>
+                  <option value="pending">Waiting for confirmation</option>
+                  <option value="failed">Save failed</option>
                 </select>
               </div>
             </div>
@@ -846,24 +935,24 @@ export default function AccordMemoryBoxPage() {
             <div className="lg:col-span-7 surface-panel rounded-[4px] overflow-hidden">
               <div className="px-5 py-3.5 bg-[#11141B] border-b border-white/[0.07] flex items-center justify-between">
                 <span className="font-mono-tabular text-[11px] uppercase tracking-[0.08em] text-[#C5A46D]">
-                  Preserved Records ({filteredMemories.length})
+                  Saved records ({filteredMemories.length})
                 </span>
                 <span className="font-mono-tabular text-[11px] text-[#6E6C65]">
-                  Select a record to inspect full payload &amp; lineage
+                  Select a record to see its details
                 </span>
               </div>
 
               {loading ? (
                 <div className="p-12 text-center font-mono-tabular text-[12px] text-[#6E6C65]">
-                  Loading Accord Memory Box archive…
+                  Loading saved trade history…
                 </div>
               ) : filteredMemories.length === 0 ? (
                 <div className="p-12 text-center space-y-2">
                   <div className="text-[14px] text-[#F4F2ED]">
-                    No memory records match your current filters
+                    No saved records match your search
                   </div>
                   <p className="text-[12px] text-[#6E6C65]">
-                    Try clearing the search query or switching category tabs.
+                    Try changing your search or choosing another category.
                   </p>
                 </div>
               ) : (
@@ -886,34 +975,34 @@ export default function AccordMemoryBoxPage() {
                             <span className="font-mono-tabular text-[11px] font-medium text-[#C5A46D]">
                               {mem.tradeRef}
                             </span>
-                            <span className="status-pill">{mem.category}</span>
+                            <span className="status-pill">{getCategoryLabel(mem.category)}</span>
                             <span className="font-mono-tabular text-[10px] text-[#6E6C65]">
-                              {mem.type}
+                              {getRecordTypeLabel(mem.type)}
                             </span>
                           </div>
                           <div>
                             {mem.verifiedOnWalrus ? (
                               <span className="status-pill status-pill-verified">
-                                Mainnet Confirmed
+                                Confirmed online
                               </span>
                             ) : mem.persistenceStatus === "write_submitted" ? (
                               <span className="status-pill status-pill-brass">
-                                Write Submitted
+                                Waiting for confirmation
                               </span>
                             ) : mem.persistenceStatus === "write_failed" ? (
                               <span className="status-pill status-pill-danger">
-                                Write Failed (Pending Retry)
+                                Online save failed
                               </span>
                             ) : (
                               <span className="status-pill">
-                                Pending Mainnet (Local Dev Mock)
+                                Saved in Accord · online confirmation pending
                               </span>
                             )}
                           </div>
                         </div>
 
                         <div className="text-[14px] font-medium text-[#F4F2ED]">
-                          {mem.title || mem.type}
+                          {mem.title || getRecordTypeLabel(mem.type)}
                         </div>
 
                         <p className="text-[12px] text-[#A6A39B] line-clamp-2 leading-relaxed">
@@ -921,8 +1010,6 @@ export default function AccordMemoryBoxPage() {
                         </p>
 
                         <div className="flex flex-wrap items-center justify-between gap-2 pt-1 font-mono-tabular text-[10px] text-[#6E6C65]">
-                          <span>ID: {mem.id}</span>
-                          <span>SHA-256: {mem.contentHash?.slice(0, 18)}…</span>
                           <span>
                             {new Date(
                               mem.metadata?.timestamp || mem.storedAt
@@ -943,7 +1030,7 @@ export default function AccordMemoryBoxPage() {
                   <div className="px-5 py-3.5 bg-[#11141B] border-b border-white/[0.08] flex items-center justify-between gap-2">
                     <div>
                       <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#C5A46D]">
-                        Record Inspector · {selectedMemory.category}
+                        Saved record · {getCategoryLabel(selectedMemory.category)}
                       </div>
                       <div className="font-mono-tabular text-[12px] text-[#F4F2ED] mt-0.5">
                         {selectedMemory.id}
@@ -955,7 +1042,7 @@ export default function AccordMemoryBoxPage() {
                           href={`/trade/${selectedMemory.tradeRef}`}
                           className="px-2.5 py-1 rounded-[3px] bg-[#090A0C] hover:bg-[#181C24] border border-white/[0.12] font-mono-tabular text-[11px] text-[#C5A46D] inline-flex items-center gap-1"
                         >
-                          <span>Open Trade {selectedMemory.tradeRef}</span>
+                          <span>Open trade {selectedMemory.tradeRef}</span>
                           <ArrowUpRight className="w-3 h-3" />
                         </Link>
                       )}
@@ -964,10 +1051,10 @@ export default function AccordMemoryBoxPage() {
                   <div className="p-5 space-y-5 text-[12px]">
                     <div>
                       <h2 className="text-[16px] font-medium text-[#F4F2ED]">
-                        {selectedMemory.title || selectedMemory.type}
+                        {selectedMemory.title || getRecordTypeLabel(selectedMemory.type)}
                       </h2>
                       <div className="font-mono-tabular text-[11px] text-[#6E6C65] mt-1">
-                        Classification: {selectedMemory.category} / {selectedMemory.type} · Recorded{" "}
+                        {getCategoryLabel(selectedMemory.category)} · {getRecordTypeLabel(selectedMemory.type)} · Saved{" "}
                         {new Date(
                           selectedMemory.metadata?.timestamp || selectedMemory.storedAt
                         ).toUTCString()}
@@ -977,7 +1064,7 @@ export default function AccordMemoryBoxPage() {
                     {/* Readable Content */}
                     <div className="p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.08] space-y-1.5">
                       <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
-                        Preserved Statement
+                        Saved details
                       </div>
                       <p className="text-[13px] text-[#F4F2ED] leading-relaxed">
                         {selectedMemory.content}
@@ -987,17 +1074,16 @@ export default function AccordMemoryBoxPage() {
                     {/* Participant / Source & Integrity Metadata */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 font-mono-tabular text-[11px]">
                       <div className="p-3 rounded-[3px] bg-[#090A0C] border border-white/[0.06]">
-                        <div className="text-[10px] text-[#6E6C65]">ACTOR / SOURCE</div>
-                        <div className="text-[#F4F2ED] truncate mt-0.5">
-                          {selectedMemory.actor || "system:accord"}
-                        </div>
+                        <div className="text-[10px] text-[#6E6C65]">RECORDED BY</div>
                         <div className="text-[10px] text-[#C5A46D] uppercase mt-0.5">
-                          Role: {selectedMemory.sourceRole || "accord_ledger"}
+                          {selectedMemory.sourceRole === "accord_ledger"
+                            ? "Accord"
+                            : selectedMemory.sourceRole || "Accord"}
                         </div>
                       </div>
 
                       <div className="p-3 rounded-[3px] bg-[#090A0C] border border-white/[0.06]">
-                        <div className="text-[10px] text-[#6E6C65]">WALRUS PERSISTENCE</div>
+                        <div className="text-[10px] text-[#6E6C65]">ONLINE SAVE STATUS</div>
                         <div
                           className={`mt-0.5 ${
                             selectedMemory.verifiedOnWalrus
@@ -1005,88 +1091,109 @@ export default function AccordMemoryBoxPage() {
                               : "text-[#C5A46D]"
                           }`}
                         >
-                          {selectedMemory.persistenceStatus}
-                        </div>
-                        <div className="text-[10px] text-[#6E6C65] mt-0.5">
-                          verifiedOnWalrus: {String(selectedMemory.verifiedOnWalrus)}
+                          {selectedMemory.verifiedOnWalrus
+                            ? "Confirmed online"
+                            : selectedMemory.persistenceStatus === "write_submitted"
+                            ? "Waiting for confirmation"
+                            : selectedMemory.persistenceStatus === "write_failed"
+                            ? "Online save failed"
+                            : "Saved in Accord · online confirmation pending"}
                         </div>
                       </div>
                     </div>
 
-                    {/* Integrity Digest, Blob ID, Tx & Evidence References */}
-                    <div className="space-y-2 font-mono-tabular text-[11px] p-3.5 rounded-[3px] bg-[#090A0C] border border-white/[0.07]">
-                      <div className="text-[10px] uppercase tracking-[0.08em] text-[#C5A46D]">
-                        Cryptographic Integrity &amp; References
-                      </div>
-                      <div className="break-all text-[#A6A39B]">
-                        <span className="text-[#6E6C65]">SHA-256 Digest: </span>
-                        <span className="text-[#F4F2ED]">{selectedMemory.contentHash}</span>
-                      </div>
-                      {selectedMemory.blobId && (
-                        <div className="break-all text-[#5CE0A8]">
-                          <span className="text-[#6E6C65]">Mainnet Blob ID: </span>
-                          <span>{selectedMemory.blobId}</span>
+                    {/* Technical record details */}
+                    <details className="rounded-[3px] border border-white/[0.07] bg-[#090A0C]">
+                      <summary className="cursor-pointer list-none p-3.5 text-[11px] text-[#A6A39B] [&::-webkit-details-marker]:hidden">
+                        Technical record details
+                      </summary>
+                      <div className="space-y-2 font-mono-tabular text-[11px] px-3.5 pb-3.5">
+                        <div className="text-[10px] uppercase tracking-[0.08em] text-[#C5A46D]">
+                          Record identifiers and references
                         </div>
-                      )}
-                      {selectedMemory.jobId && (
                         <div className="break-all text-[#A6A39B]">
-                          <span className="text-[#6E6C65]">Relayer Job ID: </span>
-                          <span>{selectedMemory.jobId}</span>
-                        </div>
-                      )}
-                      {selectedMemory.relatedTxHash && (
-                        <div className="break-all text-[#A6A39B]">
-                          <span className="text-[#6E6C65]">Transaction Hash: </span>
-                          <span className="text-[#F4F2ED]">{selectedMemory.relatedTxHash}</span>
-                        </div>
-                      )}
-                      {selectedMemory.relatedEvidenceHash && (
-                        <div className="break-all text-[#A6A39B]">
-                          <span className="text-[#6E6C65]">Evidence SHA-256: </span>
+                          <span className="text-[#6E6C65]">Recorded address: </span>
                           <span className="text-[#F4F2ED]">
-                            {selectedMemory.relatedEvidenceHash}
+                            {selectedMemory.actor || "system:accord"}
                           </span>
                         </div>
-                      )}
-                      {selectedMemory.relatedTermsHash && (
                         <div className="break-all text-[#A6A39B]">
-                          <span className="text-[#6E6C65]">Agreement Hash: </span>
-                          <span className="text-[#F4F2ED]">{selectedMemory.relatedTermsHash}</span>
+                          <span className="text-[#6E6C65]">Record ID: </span>
+                          <span className="text-[#F4F2ED]">{selectedMemory.id}</span>
                         </div>
-                      )}
-
-                      {!selectedMemory.verifiedOnWalrus && (
-                        <div className="pt-2">
-                          <button
-                            type="button"
-                            onClick={() => handleRetrySingleMemory(selectedMemory.id)}
-                            disabled={retryingId === selectedMemory.id}
-                            className="px-3 py-1.5 rounded-[3px] bg-[#13161C] hover:bg-[#181C24] border border-[#C5A46D]/40 text-[#C5A46D] text-[11px] inline-flex items-center gap-1.5"
-                          >
-                            <RefreshCw
-                              className={`w-3 h-3 ${
-                                retryingId === selectedMemory.id ? "animate-spin" : ""
-                              }`}
-                            />
-                            <span>
-                              {retryingId === selectedMemory.id
-                                ? "Retrying Mainnet Write…"
-                                : `Retry Mainnet Persistence (Attempts: ${
-                                    selectedMemory.retryCount || 0
-                                  })`}
+                        <div className="break-all text-[#A6A39B]">
+                          <span className="text-[#6E6C65]">Record checksum: </span>
+                          <span className="text-[#F4F2ED]">{selectedMemory.contentHash}</span>
+                        </div>
+                        {selectedMemory.blobId && (
+                          <div className="break-all text-[#5CE0A8]">
+                            <span className="text-[#6E6C65]">Online storage reference: </span>
+                            <span>{selectedMemory.blobId}</span>
+                          </div>
+                        )}
+                        {selectedMemory.jobId && (
+                          <div className="break-all text-[#A6A39B]">
+                            <span className="text-[#6E6C65]">Save request ID: </span>
+                            <span>{selectedMemory.jobId}</span>
+                          </div>
+                        )}
+                        {selectedMemory.relatedTxHash && (
+                          <div className="break-all text-[#A6A39B]">
+                            <span className="text-[#6E6C65]">Payment transaction ID: </span>
+                            <span className="text-[#F4F2ED]">
+                              {selectedMemory.relatedTxHash}
                             </span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                          </div>
+                        )}
+                        {selectedMemory.relatedEvidenceHash && (
+                          <div className="break-all text-[#A6A39B]">
+                            <span className="text-[#6E6C65]">Evidence checksum: </span>
+                            <span className="text-[#F4F2ED]">
+                              {selectedMemory.relatedEvidenceHash}
+                            </span>
+                          </div>
+                        )}
+                        {selectedMemory.relatedTermsHash && (
+                          <div className="break-all text-[#A6A39B]">
+                            <span className="text-[#6E6C65]">Agreement checksum: </span>
+                            <span className="text-[#F4F2ED]">
+                              {selectedMemory.relatedTermsHash}
+                            </span>
+                          </div>
+                        )}
+                        {!selectedMemory.verifiedOnWalrus && (
+                          <div className="pt-2">
+                            <button
+                              type="button"
+                              onClick={() => handleRetrySingleMemory(selectedMemory.id)}
+                              disabled={retryingId === selectedMemory.id}
+                              className="px-3 py-1.5 rounded-[3px] bg-[#13161C] hover:bg-[#181C24] border border-[#C5A46D]/40 text-[#C5A46D] text-[11px] inline-flex items-center gap-1.5"
+                            >
+                              <RefreshCw
+                                className={`w-3 h-3 ${
+                                  retryingId === selectedMemory.id ? "animate-spin" : ""
+                                }`}
+                              />
+                              <span>
+                                {retryingId === selectedMemory.id
+                                  ? "Retrying online save…"
+                                  : `Retry online save (attempt ${
+                                      selectedMemory.retryCount || 0
+                                    })`}
+                              </span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </details>
 
                     {/* Structured Payload Table */}
                     {selectedMemory.structuredPayload && (
-                      <div className="space-y-1.5">
-                        <div className="font-mono-tabular text-[10px] uppercase tracking-[0.08em] text-[#6E6C65]">
-                          Structured Record Payload
-                        </div>
-                        <div className="p-3 rounded-[3px] bg-[#090A0C] border border-white/[0.07] font-mono-tabular text-[11px] space-y-1 max-h-48 overflow-y-auto">
+                      <details className="rounded-[3px] border border-white/[0.07] bg-[#090A0C]">
+                        <summary className="cursor-pointer list-none p-3.5 text-[11px] text-[#A6A39B] [&::-webkit-details-marker]:hidden">
+                          More record details
+                        </summary>
+                        <div className="p-3.5 pt-0 font-mono-tabular text-[11px] space-y-1 max-h-48 overflow-y-auto">
                           {Object.entries(selectedMemory.structuredPayload).map(([k, v]) => (
                             <div key={k} className="flex items-baseline justify-between gap-3">
                               <span className="text-[#6E6C65] shrink-0">{k}:</span>
@@ -1096,7 +1203,7 @@ export default function AccordMemoryBoxPage() {
                             </div>
                           ))}
                         </div>
-                      </div>
+                      </details>
                     )}
 
                     {/* Related Records for Same Trade */}
@@ -1157,11 +1264,11 @@ export default function AccordMemoryBoxPage() {
           <div className="surface-panel rounded-[4px] p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="space-y-1">
               <div className="font-mono-tabular text-[11px] uppercase tracking-[0.08em] text-[#C5A46D]">
-                Complete Chronological Trade History
+                Trade activity timeline
               </div>
               <p className="text-[13px] text-[#A6A39B]">
-                Displays only genuine lifecycle events and preserved memory records that actually
-                occurred for the selected agreement.
+                Shows records saved in Accord for this trade. These records are not proof that a
+                payment or delivery happened.
               </p>
             </div>
 
@@ -1198,11 +1305,13 @@ export default function AccordMemoryBoxPage() {
                 <div className="text-[10px] text-[#6E6C65]">TRADE REFERENCE &amp; STATUS</div>
                 <div className="text-[#F4F2ED] font-medium mt-1">
                   {activeTimelineTrade.reference} ·{" "}
-                  <span className="text-[#C5A46D]">{activeTimelineTrade.status}</span>
+                  <span className="text-[#C5A46D]">
+                    {getTradeStatusLabel(activeTimelineTrade.status)}
+                  </span>
                 </div>
               </div>
               <div>
-                <div className="text-[10px] text-[#6E6C65]">PRINCIPAL &amp; NETWORK</div>
+                <div className="text-[10px] text-[#6E6C65]">AMOUNT &amp; NETWORK</div>
                 <div className="text-[#F4F2ED] mt-1">
                   {activeTimelineTrade.amount} {activeTimelineTrade.asset} (
                   {activeTimelineTrade.network})
@@ -1212,8 +1321,8 @@ export default function AccordMemoryBoxPage() {
                 <div className="text-[10px] text-[#6E6C65]">AGREEMENT VERSION</div>
                 <div className="text-[#F4F2ED] mt-1">
                   Version {activeTimelineTrade.termsVersions?.length || 1} (Buyer:{" "}
-                  {activeTimelineTrade.buyerAccepted ? "Signed" : "Pending"}, Seller:{" "}
-                  {activeTimelineTrade.sellerAccepted ? "Signed" : "Pending"})
+                  {activeTimelineTrade.buyerAccepted ? "Accepted in Accord" : "Pending"}, Seller:{" "}
+                  {activeTimelineTrade.sellerAccepted ? "Accepted in Accord" : "Pending"})
                 </div>
               </div>
               <div>
@@ -1232,7 +1341,7 @@ export default function AccordMemoryBoxPage() {
                 Chronological Lifecycle &amp; Memory Lineage — {timelineTradeRef}
               </span>
               <span className="font-mono-tabular text-[11px] text-[#6E6C65]">
-                {timelineMemories.length} Verified Event Records
+                {timelineMemories.length} saved records
               </span>
             </div>
 
@@ -1260,7 +1369,7 @@ export default function AccordMemoryBoxPage() {
                           second: "2-digit",
                         })}
                       </div>
-                      <span className="status-pill">{mem.category}</span>
+                      <span className="status-pill">{getCategoryLabel(mem.category)}</span>
                     </div>
 
                     <div className="lg:col-span-7 space-y-2">
@@ -1290,8 +1399,12 @@ export default function AccordMemoryBoxPage() {
                         }`}
                       >
                         {mem.verifiedOnWalrus
-                          ? "Confirmed Walrus Mainnet"
-                          : mem.persistenceStatus}
+                          ? "Confirmed online"
+                          : mem.persistenceStatus === "write_submitted"
+                          ? "Waiting for confirmation"
+                          : mem.persistenceStatus === "write_failed"
+                          ? "Online save failed"
+                          : "Saved in Accord · confirmation pending"}
                       </span>
                       <button
                         type="button"
@@ -1301,7 +1414,7 @@ export default function AccordMemoryBoxPage() {
                         }}
                         className="font-mono-tabular text-[11px] text-[#C5A46D] hover:underline"
                       >
-                        Inspect Record Payload →
+                        View record details →
                       </button>
                     </div>
                   </div>
